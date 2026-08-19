@@ -52,6 +52,11 @@ type Config struct {
 	DBPass string
 	DBHost string
 	DBPort int // optional (DB_PORT), defaults to 5432; config.py had no such key
+	// DBSSLMode is libpq's sslmode, used when building the connection URL.
+	// Optional (DB_SSLMODE); defaults to "prefer" — TLS when the server offers
+	// it, plain TCP otherwise. "require" for a managed database that mandates
+	// TLS, "disable" only on a trusted private network.
+	DBSSLMode string
 
 	LogLevel string
 
@@ -194,6 +199,8 @@ func Load() (*Config, error) {
 			errs = append(errs, fmt.Sprintf("DB_PORT must be an integer (got %q)", v))
 		}
 	}
+
+	c.DBSSLMode = opt("DB_SSLMODE", "prefer")
 
 	// AI_INTERVAL defaults to 5 (matches config.py's get with default 5).
 	c.AIInterval = 5

@@ -15,6 +15,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -50,26 +53,50 @@ type DB struct {
 
 // Connect opens the pool (mirroring psycopg2's SimpleConnectionPool minconn=1,
 // maxconn=30) and verifies connectivity.
+//
+// The connection string is built as a URL rather than by mutating ConnConfig
+// after parsing. pgx computes its TLS decision and its fallback address list
+// DURING ParseConfig, from whatever host it defaulted to — so assigning
+// Host/Port afterwards leaves those derived settings describing a DIFFERENT
+// server than the one we are about to talk to.
+//
+// On Linux that has been harmless: ParseConfig("") defaults to a unix socket,
+// which means TLS off and an empty fallback list, so the override just works.
+// It is not harmless anywhere else. On Windows the default is "localhost" with
+// sslmode=prefer, which builds a real fallback list — so a bot pointed at a
+// remote database that refuses TLS silently retries against localhost:5432 and
+// can end up connected to a completely different database. The same trap opens
+// on Linux the moment PGHOST/PGSSLMODE is set in the environment, or the
+// database starts requiring TLS.
+//
+// url.UserPassword percent-escapes the password, so the reason this code
+// avoided a DSN in the first place — passwords with special characters — is
+// handled by the standard library.
 func Connect(ctx context.Context, cfg *config.Config) (*DB, error) {
-	poolCfg, err := pgxpool.ParseConfig("")
-	if err != nil {
-		return nil, fmt.Errorf("db: parse config: %w", err)
-	}
-	// Set connection fields explicitly so passwords with special characters
-	// never need DSN escaping.
 	port := cfg.DBPort
 	if port == 0 {
 		port = 5432
 	}
-	poolCfg.ConnConfig.Host = cfg.DBHost
-	poolCfg.ConnConfig.Port = uint16(port)
-	poolCfg.ConnConfig.User = cfg.DBUser
-	poolCfg.ConnConfig.Password = cfg.DBPass
-	poolCfg.ConnConfig.Database = cfg.DBName
-	if poolCfg.ConnConfig.RuntimeParams == nil {
-		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
+	sslMode := cfg.DBSSLMode
+	if sslMode == "" {
+		sslMode = "prefer"
 	}
-	poolCfg.ConnConfig.RuntimeParams["client_encoding"] = "UTF8"
+
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(cfg.DBUser, cfg.DBPass),
+		Host:   net.JoinHostPort(cfg.DBHost, strconv.Itoa(port)),
+		Path:   "/" + cfg.DBName,
+	}
+	q := u.Query()
+	q.Set("sslmode", sslMode)
+	q.Set("client_encoding", "UTF8")
+	u.RawQuery = q.Encode()
+
+	poolCfg, err := pgxpool.ParseConfig(u.String())
+	if err != nil {
+		return nil, fmt.Errorf("db: parse config: %w", err)
+	}
 	poolCfg.MaxConns = 30
 	poolCfg.MinConns = 1
 
@@ -79,7 +106,7 @@ func Connect(ctx context.Context, cfg *config.Config) (*DB, error) {
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("db: ping: %w", err)
+		return nil, fmt.Errorf("db: ping %s:%d/%s: %w", cfg.DBHost, port, cfg.DBName, err)
 	}
 
 	return &DB{
