@@ -91,6 +91,7 @@ func (b *Bot) registerHandlers() {
 	b.command("admin_donate", adminDonateCmd)
 	b.command("admin_reports", adminReportsCmd)
 	b.command("admin_stats", adminStatsCmd)
+	b.command("admin_menurich", adminMenuRichCmd)
 
 	// The moderation panel's buttons. Outside prep like the other admin callback
 	// paths, and admin-checked inside the handler.

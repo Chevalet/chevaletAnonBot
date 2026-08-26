@@ -40,5 +40,10 @@ Everything button-friendly is also in <code>/menu</code> → 🛡 پنل ادم�
 <code>/admin_donate link URL</code>: set the donation link
 <code>/admin_donate link reset</code>: reset the link to config default
    -> <code>/admin donate …</code> is the same command in the /admin form
+
+<code>/admin_menurich</code>: show the /menu button style
+<code>/admin_menurich on</code>: embed menu buttons inside the message text (needs a recent Telegram client)
+<code>/admin_menurich off</code>: classic inline keyboard (default, safe on every client)
+   -> off is the safe default: older Telegram clients cannot render embedded buttons at all
 🔸---------------
 <code>/admin backup</code>: send the last backup file

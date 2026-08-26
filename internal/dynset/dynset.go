@@ -134,6 +134,25 @@ func (s *Settings) SetDonationEnabled(on bool) {
 	s.set("donation_enabled", strconv.FormatBool(on))
 }
 
+// MenuRichEnabled reports whether the /menu panel should be drawn as a Bot API
+// 10.3 "rich message", with its buttons embedded in the text, instead of as a
+// classic inline keyboard.
+//
+// It defaults to FALSE, and that default is a safety decision rather than a
+// preference. A rich message carries no fallback content — no text and no
+// reply_markup, only rich blocks — so a Telegram client too old to render one
+// shows the user nothing they can tap. Since the panel is how users reach every
+// feature, enabling this for everyone at once would strand whoever has not
+// updated. Living here rather than in the env config means it can be turned on
+// for a test audience and turned off again instantly, with no redeploy, if a
+// single old-client report comes in.
+func (s *Settings) MenuRichEnabled() bool { return s.get("menu_rich", "false") == "true" }
+
+// SetMenuRichEnabled turns the embedded-button menu on or off and persists it.
+func (s *Settings) SetMenuRichEnabled(on bool) {
+	s.set("menu_rich", strconv.FormatBool(on))
+}
+
 // DonationLink returns the donation URL, falling back to the config default
 // (DONATION_LINK) when an admin has not overridden it.
 func (s *Settings) DonationLink() string { return s.get("donation_link", s.defaultDonation) }

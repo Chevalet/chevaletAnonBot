@@ -182,9 +182,24 @@ func menuCmd(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
 	// rather than leaving a send state armed to swallow their next message.
 	b.dropConversations(ctx)
 	b.ensureMenuBar(tg, ctx, userid)
+	kb := mainMenuKeyboard(b.isAdmin(userid))
+
+	// The rich panel is a standalone message rather than a reply. Nothing is lost:
+	// the panel is the only thing on screen the user is looking at, and quoting
+	// their own "/menu" adds noise. Falls back to the classic reply on refusal.
+	if b.Dyn.MenuRichEnabled() && ctx.EffectiveChat != nil {
+		rctx, cancel := b.bg()
+		_, err := b.richMenuSend(rctx, ctx.EffectiveChat.Id, menuTitle, kb)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		slog.Warn("rich menu send failed; falling back to the classic keyboard", "err", err)
+	}
+
 	_, err := ctx.EffectiveMessage.Reply(tg, menuTitle, &gotgbot.SendMessageOpts{
 		ParseMode:   "HTML",
-		ReplyMarkup: mainMenuKeyboard(b.isAdmin(userid)),
+		ReplyMarkup: kb,
 	})
 	return err
 }
@@ -427,6 +442,22 @@ func (b *Bot) panelEdit(tg *gotgbot.Bot, ctx *ext.Context, text string, kb gotgb
 	if msg == nil || len([]rune(text)) > panelTextLimit {
 		return b.panelSend(tg, ctx, text, kb)
 	}
+	// Embedded-button rendering, when an admin has switched it on. A failure here
+	// is not fatal: we fall through to the classic edit below, so a screen the
+	// rich parser rejects still reaches the user as a normal keyboard.
+	if b.Dyn.MenuRichEnabled() {
+		rctx, cancel := b.bg()
+		err := b.richMenuEdit(rctx, msg.Chat.Id, msg.MessageId, text, kb)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if errMessageNotModified(err) {
+			return nil
+		}
+		slog.Warn("rich menu edit failed; falling back to the classic keyboard", "err", err)
+	}
+
 	if _, _, err := msg.EditText(tg, text, &gotgbot.EditMessageTextOpts{
 		ParseMode:          "HTML",
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
@@ -452,6 +483,18 @@ func (b *Bot) panelSend(tg *gotgbot.Bot, ctx *ext.Context, text string, kb gotgb
 	if chatID == 0 {
 		return nil
 	}
+
+	// Same deal as panelEdit: try rich, fall back to classic on any refusal.
+	if b.Dyn.MenuRichEnabled() {
+		rctx, cancel := b.bg()
+		_, err := b.richMenuSend(rctx, chatID, text, kb)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		slog.Warn("rich menu send failed; falling back to the classic keyboard", "err", err)
+	}
+
 	_, err := tg.SendMessage(chatID, text, &gotgbot.SendMessageOpts{
 		ParseMode:          "HTML",
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
