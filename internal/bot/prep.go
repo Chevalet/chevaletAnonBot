@@ -23,6 +23,41 @@ import (
 // enclosing ConversationHandler interprets the latter (see registerHandlers).
 type Handler func(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error
 
+// ignoredChat reports whether an update from this chat must be dropped before
+// any handler sees it.
+//
+// It rejects exactly the chats the Python prep rejected (decorators.py:21-31):
+// legacy "group"/"channel" chats and the GM group (whose AI flow has its own
+// un-prepped handler). Private chats AND ordinary supergroups are allowed —
+// Python does NOT reject type=="supergroup", so the live bot still answers
+// commands and the catch-all there; an earlier "private only" gate silently
+// dropped those, a parity gap. (Python's extra my_chat_member check is moot:
+// that update type isn't in AllowedUpdates.)
+//
+// It additionally rejects a channel's "direct messages" chat, which has no
+// Python counterpart because the feature did not exist then. Such a chat is a
+// SUPERGROUP, so the rule above deliberately lets it through: once this bot is
+// added to a channel that has direct messages enabled, every message users send
+// to the channel owner arrives here, and the catch-all would answer it as if the
+// sender were talking to the bot — putting bot replies into someone else's
+// inbox. chat.is_direct_messages is the official flag for this, and the right
+// one to branch on: it lives on the Chat, so it is set for EVERY update type
+// (message and callback_query alike), whereas the per-message
+// direct_messages_topic exists only on a Message. There is no way to filter
+// these out further upstream — allowed_updates selects update types, not chats.
+func ignoredChat(ec *gotgbot.Chat, gmGroupID string) bool {
+	if ec == nil {
+		return false
+	}
+	if ec.Type == "channel" || ec.Type == "group" {
+		return true
+	}
+	if ec.IsDirectMessages {
+		return true
+	}
+	return gmGroupID != "" && strconv.FormatInt(ec.Id, 10) == gmGroupID
+}
+
 // prep wraps a Handler with the middleware from modules/Global/decorators.py
 // (@prep_function): it filters out non-private and edited updates, initialises
 // the user (row, a cid, a chevaletid), rejects banned users, then dispatches.
@@ -32,20 +67,8 @@ func (b *Bot) prep(fn Handler) handlers.Response {
 		if ctx.Update.EditedMessage != nil {
 			return nil
 		}
-		// Reject exactly the chats the Python prep rejected (decorators.py:21-31):
-		// legacy "group"/"channel" chats and the GM group (whose AI flow has its
-		// own un-prepped handler). Private chats AND ordinary supergroups are
-		// allowed — Python does NOT reject type=="supergroup", so the live bot
-		// still answers commands and the catch-all there; the earlier "private
-		// only" gate silently dropped those, a parity gap. (Python's extra
-		// my_chat_member check is moot: that update type isn't in AllowedUpdates.)
-		if ec := ctx.EffectiveChat; ec != nil {
-			if ec.Type == "channel" || ec.Type == "group" {
-				return nil
-			}
-			if b.Cfg.GMGroupID != "" && strconv.FormatInt(ec.Id, 10) == b.Cfg.GMGroupID {
-				return nil
-			}
+		if ignoredChat(ctx.EffectiveChat, b.Cfg.GMGroupID) {
+			return nil
 		}
 		if ctx.EffectiveUser == nil {
 			return nil
