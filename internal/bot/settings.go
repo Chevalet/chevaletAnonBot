@@ -185,6 +185,35 @@ func seenSettings(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) erro
 	})
 }
 
+// nameSyncClbk drives the "🔄 هم‌گام‌سازی نام با اکانت" toggle: keep the display
+// name others see in step with the user's Telegram account name, so renaming the
+// account no longer means coming here to retype it.
+//
+// Turning it ON applies the last-seen account name straight away. Without that,
+// the toggle would appear to do nothing until the user's NEXT account rename,
+// which is not what "keep them in step" means to somebody who just asked for it.
+// Turning it OFF writes nothing else: the name stays exactly where it is.
+func nameSyncClbk(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
+	return b.settingsToggle(tg, ctx, userid, toggleSpec{
+		textKey: "settings/name_sync", get: b.DB.GetNameSync,
+		set: func(c context.Context, uid string, on bool) error {
+			if err := b.DB.SetNameSync(c, uid, on); err != nil {
+				return err
+			}
+			if !on {
+				return nil
+			}
+			_, err := b.DB.ApplyNameSync(c, uid)
+			return err
+		},
+		trueWord: txtStateActive, falseWord: txtStateInactive,
+		activateBtn:   settingsButtons["name-sync-activate"],
+		deactivateBtn: settingsButtons["name-sync-deactivate"],
+		ansActivate:   txtNameSyncAnswerActivate,
+		ansDeactivate: txtNameSyncAnswerDeactivate,
+	})
+}
+
 // changeName ports change_name: shows the rename prompt and enters state 0.
 func changeName(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
 	if ctx.CallbackQuery == nil || ctx.CallbackQuery.Data == "" {
@@ -228,13 +257,33 @@ func updateName(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error 
 	if err := b.DB.SetName(dbctx, userid, newName); err != nil {
 		return err
 	}
+
+	// Typing a name here is a statement that THIS is the name you want, so it
+	// switches account syncing off. Leaving it on would silently revert the name
+	// the user just chose at their next Telegram rename — the setting and the
+	// action would be fighting each other, and the user would only find out from
+	// somebody else's screen. Announced below rather than done quietly.
+	syncWasOn, serr := b.DB.GetNameSync(dbctx, userid)
+	if serr != nil {
+		return serr
+	}
+	if syncWasOn {
+		if e := b.DB.SetNameSync(dbctx, userid, false); e != nil {
+			return e
+		}
+	}
+
 	b.deleteOgMID(tg, ctx, userid)
 	name, err := b.DB.GetName(dbctx, userid)
 	if err != nil {
 		return err
 	}
-	if _, e := msg.Reply(tg, fmt.Sprintf(
-		"انجام شد. اسم جدیدت:\n%s\n\nمیتونی لینک خودتو تست کنی تا ببینی چجوری شده :)", name),
+	done := fmt.Sprintf(
+		"انجام شد. اسم جدیدت:\n%s\n\nمیتونی لینک خودتو تست کنی تا ببینی چجوری شده :)", name)
+	if syncWasOn {
+		done += txtNameSyncTurnedOffByRename
+	}
+	if _, e := msg.Reply(tg, done,
 		&gotgbot.SendMessageOpts{ParseMode: "HTML", ReplyMarkup: ikb(row(settingsButtons["back-to-menu"]))},
 	); e != nil {
 		// Python used reply_html here WITHOUT reply_parameters; gotgbot Reply

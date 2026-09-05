@@ -1,6 +1,9 @@
 package db
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AddUser upserts a user with the Python defaults (not banned, warning on, no
 // seen, wpp on, default cid_limit, no custom_tag, default audio_tag, no
@@ -222,4 +225,142 @@ func (db *DB) SetMenuBarSent(ctx context.Context, uid string) error {
 	_, err := db.pool.Exec(ctx,
 		`UPDATE users SET menu_bar_sent = TRUE WHERE uid=$1`, uid)
 	return err
+}
+
+// --- display-name syncing ----------------------------------------------------
+//
+// A user's display name is what OTHERS see when they open that user's anonymous
+// link. It was set once, from their Telegram account name, when they first
+// started the bot — so renaming the account left a stale name behind forever
+// unless the user went into /settings and retyped it. name_sync fixes that.
+//
+// THE RULE THAT PROTECTS EXISTING USERS. The column defaults to TRUE, but a
+// TRUE flag alone never renames anybody: SyncDisplayName only copies the account
+// name across once it has SEEN that name change. On the very first sighting of a
+// user's account name it records a baseline and renames nothing — and if the
+// stored display name already differs from the account name at that moment, it
+// turns the sync OFF for that user, because a diverged name is the signature of
+// somebody who set it deliberately (the rename page tells users they can format
+// it and link it to their channel). Every user who predates the feature
+// therefore keeps exactly the name they have.
+
+// nameSyncMinInterval bounds how often the baseline timestamp is rewritten. The
+// sync runs on EVERY update (see initUser), so without this the statement would
+// write a row every time instead of only when something actually moved. An hour
+// is far below the staleness window a reader cares about (see GetDisplayName)
+// and far above the update rate of any one user.
+const nameSyncMinInterval = time.Hour
+
+// SyncDisplayName records uid's current Telegram account name and, when that
+// user has syncing on and the name has actually CHANGED since the last sighting,
+// copies it into their display name.
+//
+// It is one statement on purpose: every branch of the rule reads the row's
+// pre-update values, so the "first sighting" and "already diverged" cases cannot
+// race each other, and the common case (nothing changed, seen recently) matches
+// no row and writes nothing — the same trick TouchUser uses.
+//
+// Returns the display name now in force, or "" when the statement was a no-op
+// and the caller's existing copy is still current.
+func (db *DB) SyncDisplayName(ctx context.Context, uid, tgName string) (string, error) {
+	tgName = truncateRunes(tgName, db.maxNameLength)
+
+	var name string
+	err := db.pool.QueryRow(ctx,
+		`UPDATE users SET
+		     tg_name    = $2,
+		     tg_name_at = now(),
+		     -- First sighting of this user's account name AND their display name
+		     -- already differs from it: they chose that name. Opt them out.
+		     name_sync = CASE
+		         WHEN tg_name IS NULL AND name <> $2 THEN FALSE
+		         ELSE name_sync END,
+		     -- Rename only on a SEEN change: tg_name must already be recorded (so
+		     -- this is not the first sighting) and must actually differ.
+		     name = CASE
+		         WHEN tg_name IS NOT NULL AND name_sync AND tg_name <> $2 THEN $2
+		         ELSE name END
+		   WHERE uid = $1
+		     AND (tg_name IS DISTINCT FROM $2
+		          OR tg_name_at IS NULL
+		          OR tg_name_at < now() - $3::interval)
+		 RETURNING name`,
+		uid, tgName, nameSyncMinInterval.String(),
+	).Scan(&name)
+	if IsNoRows(err) {
+		return "", nil // nothing needed writing
+	}
+	if err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// DisplayName is what a send path needs to render a target's name — and to
+// decide whether it is worth one Telegram call to refresh it first.
+type DisplayName struct {
+	Name string
+	// Sync is the user's name_sync setting. False means the name is theirs and
+	// must be shown as-is.
+	Sync bool
+	// Stale is true when this user's account name has never been recorded, or was
+	// last looked at longer ago than the caller's TTL. Only then is a refresh
+	// worth an API round-trip.
+	Stale bool
+}
+
+// GetDisplayName fetches a target's display name together with everything needed
+// to decide on refreshing it, in a single round-trip. ttl is how old the last
+// sighting may be before Stale is reported.
+//
+// A missing row yields the zero value with no error: the send paths only ever
+// ask about an initialised user, so this is defensive.
+func (db *DB) GetDisplayName(ctx context.Context, uid string, ttl time.Duration) (DisplayName, error) {
+	var d DisplayName
+	err := db.pool.QueryRow(ctx,
+		`SELECT name,
+		        COALESCE(name_sync, FALSE),
+		        (tg_name_at IS NULL OR tg_name_at < now() - $2::interval)
+		   FROM users WHERE uid = $1`,
+		uid, ttl.String(),
+	).Scan(&d.Name, &d.Sync, &d.Stale)
+	if IsNoRows(err) {
+		return DisplayName{}, nil
+	}
+	return d, err
+}
+
+// GetNameSync reports whether uid has display-name syncing on.
+func (db *DB) GetNameSync(ctx context.Context, uid string) (bool, error) {
+	return db.queryBool(ctx, `SELECT name_sync FROM users WHERE uid=$1`, uid)
+}
+
+// SetNameSync turns display-name syncing on or off for uid.
+func (db *DB) SetNameSync(ctx context.Context, uid string, on bool) error {
+	_, err := db.pool.Exec(ctx, `UPDATE users SET name_sync=$1 WHERE uid=$2`, on, uid)
+	return err
+}
+
+// ApplyNameSync copies the last-seen account name into the display name right
+// now, for a user who has syncing on.
+//
+// Turning the setting on is a request for the two to match, so it has to take
+// effect immediately rather than at the user's next account rename — otherwise
+// the toggle appears to do nothing. Returns the display name in force
+// afterwards (unchanged when there was nothing to apply).
+func (db *DB) ApplyNameSync(ctx context.Context, uid string) (string, error) {
+	var name string
+	err := db.pool.QueryRow(ctx,
+		`UPDATE users SET name = tg_name
+		   WHERE uid = $1 AND name_sync AND tg_name IS NOT NULL AND name <> tg_name
+		 RETURNING name`, uid).Scan(&name)
+	if IsNoRows(err) {
+		// Nothing to apply (syncing off, never seen, or already equal) — report the
+		// name as it stands so the caller can render it either way.
+		return db.GetName(ctx, uid)
+	}
+	if err != nil {
+		return "", err
+	}
+	return name, nil
 }

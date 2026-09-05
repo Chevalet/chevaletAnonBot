@@ -58,7 +58,7 @@ var otherPrefixFilters = []string{
 	"errmore|", "rpt|", "am|", "no-callback", "delete|",
 	"reply-quote|", "media-settings|", "change-name|", "custom-tag|", "audio-tag|",
 	"wpp|", "warning|", "easier-answer|", "channel-signature|", "seen-settings|",
-	"anon-name|", "unblock-all|", "unblock-me|", "ch-link", "rm-link",
+	"anon-name|", "name-sync|", "unblock-all|", "unblock-me|", "ch-link", "rm-link",
 	"answer|", "seen|", "report|", "block|", "unblock|", "cancel",
 	"oth|", "othx|",
 }
@@ -294,13 +294,73 @@ func TestModerationScreensHaveAnExit(t *testing.T) {
 	}
 }
 
-// TestNoBlueMenuButton pins the command list empty. Telegram renders its blue
-// "Menu" button only while a bot has registered commands, and two competing menu
-// affordances side by side is what made the UI cluttered — so re-adding an entry
-// here silently undoes that.
-func TestNoBlueMenuButton(t *testing.T) {
-	if got := botCommands(); len(got) != 0 {
-		t.Errorf("botCommands() has %d entries (%v); Telegram would show its blue Menu button again", len(got), got)
+// TestCommandListLeadsWithMenu pins the shape of the published command list.
+// /menu is the entry to everything else, so it must be the first thing a user
+// sees in the autocomplete without scrolling; an empty list would take the blue
+// "Menu" button away again and strand anyone who collapsed the 🏠 منو bar.
+func TestCommandListLeadsWithMenu(t *testing.T) {
+	got := botCommands()
+	if len(got) == 0 {
+		t.Fatal("botCommands() is empty; Telegram would show no command list and no blue Menu button")
+	}
+	if got[0].Command != "menu" {
+		t.Errorf("the command list starts with /%s; /menu must be first", got[0].Command)
+	}
+	for _, c := range got {
+		if c.Description == "" {
+			t.Errorf("/%s has no description; Telegram shows the list with a blank line", c.Command)
+		}
+	}
+}
+
+// TestPublicCommandsHideTheAdminSurface guards the reason the admin commands are
+// published per-admin instead of in the default scope: the default list reaches
+// every user, so an admin entry slipping in advertises the moderation surface to
+// all of them.
+func TestPublicCommandsHideTheAdminSurface(t *testing.T) {
+	for _, c := range botCommands() {
+		if strings.HasPrefix(c.Command, "admin") {
+			t.Errorf("/%s is in the PUBLIC command list; admin commands belong in adminBotCommands only", c.Command)
+		}
+	}
+}
+
+// TestAdminCommandsExtendTheUserOnes checks an admin still gets the ordinary
+// commands. Their scoped list REPLACES the default one in their chat rather than
+// adding to it, so building it from anything but botCommands() would silently
+// take /menu and friends away from exactly the people who use them most.
+func TestAdminCommandsExtendTheUserOnes(t *testing.T) {
+	admin := adminBotCommands()
+	has := func(name string) bool {
+		for _, c := range admin {
+			if c.Command == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range botCommands() {
+		if !has(c.Command) {
+			t.Errorf("an admin's command list is missing /%s, which every user has", c.Command)
+		}
+	}
+	if !has("admin") {
+		t.Error("an admin's command list has no /admin")
+	}
+	if len(admin) <= len(botCommands()) {
+		t.Error("adminBotCommands() adds nothing to the public list")
+	}
+}
+
+// TestHelpTextMentionsTheMenuCommand pins /menu into the guide. The bar can be
+// collapsed, so the guide has to name a way in that survives that.
+func TestHelpTextMentionsTheMenuCommand(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "Texts", "start_help.txt"))
+	if err != nil {
+		t.Fatalf("reading Texts/start_help.txt: %v", err)
+	}
+	if !strings.Contains(string(raw), "/menu") {
+		t.Error("the guide never mentions /menu, so a user whose bar is collapsed is told nothing")
 	}
 }
 
@@ -337,5 +397,82 @@ func TestHelpSubPagesReturnToHelp(t *testing.T) {
 	// The generic back row must still exist for screens that DO belong at the top.
 	if backRow()[0].CallbackData != "menu|"+menuMain {
 		t.Errorf("backRow no longer targets the main menu: %q", backRow()[0].CallbackData)
+	}
+}
+
+// TestNameSyncButtonReachesItsHandler covers the same invisible failure mode as
+// TestMenuDataDoesNotCollide, for the settings side: "🔄 هم‌گام‌سازی نام با
+// اکانت" is registered with Prefix("name-sync|"), and it sits next to
+// "anon-name|" and "change-name|" — three name-ish buttons whose filters must not
+// overlap, or one of them silently opens another one's page.
+func TestNameSyncButtonReachesItsHandler(t *testing.T) {
+	const data = "name-sync|"
+
+	var found bool
+	for _, r := range settingsMainMenu() {
+		for _, btn := range r {
+			if btn.CallbackData == data {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no settings button carries %q, so the name-sync page is unreachable", data)
+	}
+
+	// Nothing registered ahead of it may claim its data...
+	for _, p := range otherPrefixFilters {
+		if p == data {
+			continue
+		}
+		if strings.HasPrefix(data, p) {
+			t.Errorf("%q starts with %q, which another handler claims first", data, p)
+		}
+	}
+	for _, sub := range conversationContainsFilters {
+		if strings.Contains(data, sub) {
+			t.Errorf("%q contains %q, so a cqContains handler would swallow it", data, sub)
+		}
+	}
+	// ...and it must not claim anybody else's, in either direction.
+	for _, other := range otherPrefixFilters {
+		if other != data && strings.HasPrefix(other, data) {
+			t.Errorf("%q would swallow %q", data, other)
+		}
+	}
+
+	// Both flip variants have to route to the same page, so they must share the
+	// prefix the handler is registered under.
+	for _, k := range []string{"name-sync-activate", "name-sync-deactivate"} {
+		got := settingsButtons[k].CallbackData
+		if !strings.HasPrefix(got, data) {
+			t.Errorf("settingsButtons[%q] is %q; it must start with %q to reach the handler", k, got, data)
+		}
+	}
+}
+
+// TestNameSyncIsSeparateFromTheAnonNickname guards the distinction users are
+// most likely to conflate, and that the settings page spells out: the display
+// name is what somebody sees when messaging YOU, the anonymous nickname is a
+// signature on what you SEND. They are different settings on different columns,
+// so their buttons must stay different too.
+func TestNameSyncIsSeparateFromTheAnonNickname(t *testing.T) {
+	seen := map[string]bool{}
+	for _, r := range settingsMainMenu() {
+		for _, btn := range r {
+			if btn.CallbackData == "" {
+				t.Errorf("settings button %q has no callback_data", btn.Text)
+				continue
+			}
+			if seen[btn.CallbackData] {
+				t.Errorf("two settings buttons share callback_data %q", btn.CallbackData)
+			}
+			seen[btn.CallbackData] = true
+		}
+	}
+	for _, want := range []string{"name-sync|", "anon-name|", "change-name|"} {
+		if !seen[want] {
+			t.Errorf("the settings menu lost the %q button", want)
+		}
 	}
 }

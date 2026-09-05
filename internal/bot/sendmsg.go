@@ -429,7 +429,10 @@ func (b *Bot) warningHandle(ctx *ext.Context, wasChannelReply bool, targetUID, u
 	var sentText string
 	if wasChannelReply {
 		deletionTimeout = config.DeletionTimeoutExtended
-		name, err := b.DB.GetName(dbctx, targetUID)
+		// displayName rather than GetName, for the same reason as the connect
+		// message: this prints somebody else's name, so it is a place a stale one
+		// would show. See namesync.go.
+		name, err := b.displayName(targetUID)
 		if err != nil {
 			return nil, err
 		}

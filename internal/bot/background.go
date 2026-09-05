@@ -49,34 +49,81 @@ func (b *Bot) startBackground(ctx context.Context) {
 	}
 }
 
-// botCommands is the list Telegram shows in its blue "Menu" button. Empty by
-// design — see setCommands. Split out so a test can assert it stays empty, since
-// re-adding an entry silently brings the blue button back next to the 🏠 منو bar.
-func botCommands() []gotgbot.BotCommand { return []gotgbot.BotCommand{} }
+// botCommands is the list Telegram shows in its blue "Menu" button next to the
+// input box, and the autocomplete a user gets after typing "/".
+//
+// /menu IS FIRST DELIBERATELY. It is the entry to everything else, so it must be
+// the one a user sees without scrolling.
+//
+// This list was EMPTY for a while, to remove the blue button and leave the 🏠 منو
+// bar as the single navigation affordance. That turned out to strand people: the
+// bar is a ReplyKeyboard, it can be collapsed behind the keyboard icon, and a
+// user who collapsed it or never saw the notice had no visible way back into the
+// bot at all. Two affordances is a smaller problem than no affordance, so the
+// commands are back.
+//
+// ADMIN COMMANDS ARE NOT HERE. This list goes to every user, so listing them
+// would advertise the admin surface to every one of them. They are published
+// per-admin instead — see adminBotCommands and setCommands.
+func botCommands() []gotgbot.BotCommand {
+	return []gotgbot.BotCommand{
+		{Command: "menu", Description: "🏠 منوی اصلی"},
+		{Command: "start", Description: "▶️ شروع"},
+		{Command: "my_links", Description: "🔗 لینک‌های ناشناس من"},
+		{Command: "settings", Description: "⚙️ تنظیمات و قابلیت‌ها"},
+		{Command: "help", Description: "🆘 راهنما"},
+		{Command: "privacy", Description: "🔒 امنیت و حریم خصوصی"},
+		{Command: "donate", Description: "🙏 حمایت مالی"},
+		{Command: "myuid", Description: "🆔 آیدی عددی من"},
+		{Command: "bug", Description: "🐞 گزارش باگ"},
+		{Command: "cancel", Description: "❌ لغو عملیات فعلی"},
+	}
+}
 
-// setCommands ports jobs.set_commands: registers the bot's command menu. (The
-// list matches the job's, which includes /donate — it superseded the shorter
-// list main.py set at startup.)
+// adminBotCommands is what an ADMIN sees: everything above plus the admin
+// commands, published only into that admin's own chat.
+//
+// Every one of these already refuses a non-admin at the handler (each checks
+// isAdmin and falls through to the ordinary catch-all reply), so this is about
+// visibility, not access: an admin gets them in autocomplete without the rest of
+// the users being shown a surface that is not theirs.
+func adminBotCommands() []gotgbot.BotCommand {
+	return append(botCommands(),
+		gotgbot.BotCommand{Command: "admin", Description: "🛡 پنل ادمین"},
+		gotgbot.BotCommand{Command: "admin_stats", Description: "📊 آمار روزانه"},
+		gotgbot.BotCommand{Command: "admin_reports", Description: "🚨 گزارش‌ها"},
+		gotgbot.BotCommand{Command: "admin_donate", Description: "💳 تنظیم لینک حمایت"},
+	)
+}
+
+// setCommands ports jobs.set_commands: registers the bot's command menu.
+//
+// Two scopes. The default scope reaches everyone; a per-chat scope is then set
+// for each configured admin, which Telegram gives precedence over the default in
+// that one chat. Both are best effort — a bot that cannot publish its command
+// list still works, every command is registered either way.
 func (b *Bot) setCommands() {
-	// EMPTY ON PURPOSE. Telegram shows its blue "Menu" button next to the input box
-	// only while a bot has registered commands; clearing the list removes it, which
-	// is the point — the 🏠 منو bar button now covers navigation, and two competing
-	// menu affordances side by side is what made the UI feel cluttered.
-	//
-	// Every command STILL WORKS: /start, /menu, /cancel, /help, /settings,
-	// /my_links, /donate, /privacy, /myuid, /bug and the admin ones are all
-	// registered exactly as before, and Telegram still renders them as tappable
-	// links where the texts mention them. Only the list — and with it the blue
-	// button — is gone.
-	//
-	// To bring the blue button back, put entries in botCommands(); nothing else
-	// changes.
-	_, err := b.TG.SetMyCommands(botCommands(), nil)
-	if err != nil {
+	if _, err := b.TG.SetMyCommands(botCommands(), nil); err != nil {
 		slog.Warn("set_commands failed", "err", err)
 		return
 	}
-	slog.Info("successfully set the commands")
+	slog.Info("successfully set the commands", "count", len(botCommands()))
+
+	// Admins are a handful of uids from config, so this is a few extra calls at
+	// startup, paced by the outbound rate limiter like everything else.
+	for uid := range b.admins {
+		id, err := strconv.ParseInt(uid, 10, 64)
+		if err != nil {
+			slog.Warn("skipping admin command scope: unparseable uid", "uid", uid)
+			continue
+		}
+		if _, err := b.TG.SetMyCommands(adminBotCommands(), &gotgbot.SetMyCommandsOpts{
+			Scope: gotgbot.BotCommandScopeChat{ChatId: id},
+		}); err != nil {
+			// Expected when an admin has never opened a chat with the bot.
+			slog.Info("could not set the admin command list", "uid", uid, "err", err)
+		}
+	}
 }
 
 // checkConnectionLoop ports jobs.check_connection. Python registered it with

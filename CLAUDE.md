@@ -112,9 +112,13 @@ reimplementing them — so don't "tidy" that data. Every other panel button is
 the substrings their `cqContains` filters match; `menu_test.go` asserts that, so a
 colliding button fails the build instead of silently doing nothing.
 
-Only `/menu` and `/cancel` are in the Telegram command list, but every old
-command (`/help`, `/settings`, `/my_links`, `/donate`, `/privacy`, `/myuid`,
-`/bug`, the admin ones) is still registered and still works.
+The Telegram command list is published at startup by `setCommands`
+(`background.go`) in two scopes: `botCommands()` goes to everyone with `/menu`
+first, and `adminBotCommands()` goes to each configured admin's own chat via
+`BotCommandScopeChat` so the admin commands are visible only to them. Access is
+enforced at the handlers (each admin handler checks `isAdmin`), not by the list.
+`menu_test.go` pins `/menu` to the front and asserts no admin command leaks into
+the public list.
 
 ### Package layout
 
