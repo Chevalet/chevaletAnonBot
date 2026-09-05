@@ -163,7 +163,11 @@ func (b *Bot) startConnect(tg *gotgbot.Bot, ctx *ext.Context, userid, targetCid 
 		return handlers.EndConversation()
 	}
 
-	name, err := b.DB.GetName(dbctx, targetUID)
+	// displayName, not GetName: the target may have renamed their Telegram account
+	// since they last touched the bot, and this line is where somebody else reads
+	// their name. See namesync.go — it is a no-op unless that user syncs their name
+	// and the bot's copy has gone stale.
+	name, err := b.displayName(targetUID)
 	if err != nil {
 		return err
 	}

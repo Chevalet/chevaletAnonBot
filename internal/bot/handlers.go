@@ -134,6 +134,7 @@ func (b *Bot) settingsConversation() handlers.Conversation {
 		handlers.NewCallback(cqfilters.Prefix("easier-answer|"), b.prep(easierAnswer)),
 		handlers.NewCallback(cqfilters.Prefix("channel-signature|"), b.prep(channelSignature)),
 		handlers.NewCallback(cqfilters.Prefix("seen-settings|"), b.prep(seenSettings)),
+		handlers.NewCallback(cqfilters.Prefix("name-sync|"), b.prep(nameSyncClbk)),
 		handlers.NewCallback(cqfilters.Prefix("anon-name|"), b.prep(anonName)),
 		handlers.NewCallback(cqfilters.Prefix("anon-name-set"), b.prep(anonNameSet)),
 		handlers.NewCallback(cqfilters.Prefix("anon-name-remove"), b.prep(removeAnonName)),

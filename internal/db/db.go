@@ -157,6 +157,27 @@ func (db *DB) MakeTables(ctx context.Context) error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS anon_emoji VARCHAR(255)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS anon_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
 
+		// name_sync / tg_name / tg_name_at back "keep my display name in step with
+		// my Telegram account name", so a user who renames their account does not
+		// have to come here and retype it. See SyncDisplayName for the rules.
+		//
+		// name_sync DEFAULTS TO TRUE, so a NEW user gets it without asking. Existing
+		// rows get TRUE too, but that alone changes nothing for them: SyncDisplayName
+		// never renames on the first sighting of a user's account name, and opts a
+		// user OUT when their stored display name has already diverged from it —
+		// which is exactly the population that set a display name by hand (the
+		// rename page advertises HTML-formatted names linking to a channel). So every
+		// user who predates this feature keeps the name they chose — rehearsed against
+		// a restored copy of production: zero renames, however the account names had
+		// drifted.
+		//
+		// tg_name is the last account name we saw; tg_name_at is when we last looked.
+		// Both are NULL on existing rows, which is what marks a user as "never seen"
+		// and triggers the no-rename first sighting above.
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS name_sync BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_name VARCHAR(255)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_name_at TIMESTAMPTZ`,
+
 		// Columns backing the daily admin stats (/admin_stats).
 		//
 		// NOTE THE MISSING DEFAULT on created_at, and that it is added in two steps.

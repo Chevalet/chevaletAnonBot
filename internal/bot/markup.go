@@ -114,6 +114,9 @@ func settingsMainMenu() [][]gotgbot.InlineKeyboardButton {
 		{cb("🔗 پیشنمایشِ لینک", "wpp|"), cb("👌 ارسال پیامهای پیوسته", "media-settings|")},
 		{cb("🖋 ریپلای به بخشی از پیام", "reply-quote|"), cb("👀 نمایش دکمه سین زدن", "seen-settings|")},
 		{cb("⚠️ اخطار پاک سازی پیام", "warning|"), cb("📛 تغییر نام نمایشی", "change-name|")},
+		// Its own row, directly under the rename button it belongs with: the label
+		// is long enough that sharing a row truncates it on a narrow screen.
+		{cb("🔄 هم‌گام‌سازی نام با اکانت", "name-sync|")},
 		{cb("#️⃣ تگ آهنگ", "audio-tag|"), cb("#️⃣ تگ دلخواه", "custom-tag|")},
 		{cb("🎭 نام مستعار ناشناس", "anon-name|")},
 		{cb("🚫 آنبلاک شدن خودت", "unblock-me|"), cb("🚫 آنبلاک همه", "unblock-all|")},
@@ -127,20 +130,22 @@ func settingsMainMenu() [][]gotgbot.InlineKeyboardButton {
 
 // settingsButtons mirrors the single-button entries of SETTINGS_MARKUP.
 var settingsButtons = map[string]gotgbot.InlineKeyboardButton{
-	"formatting":         cb("❔قالب بندی چیه", "what-is-formatting"),
-	"back-to-menu":       cb("↪️ بازگشت به منوی اصلی", "settings-menu"),
-	"nvm-back-to-menu":   cb("↪️ بیخیالش برگرد منوی اصلی", "settings-menu"),
-	"wpp-activate":       cb("✅ برگشت به حالت پیشفرض", "wpp|activate"),
-	"wpp-deactivate":     cb("❌ غیرفعال سازی اجباری", "wpp|deactivate"),
-	"warning-activate":   cb("✅ فعالسازی", "warning|activate"),
-	"warning-deactivate": cb("❌ غیرفعالسازی", "warning|deactivate"),
-	"seen-activate":      cb("✅ فعالسازی", "seen-settings|activate"),
-	"seen-deactivate":    cb("❌ غیرفعالسازی", "seen-settings|deactivate"),
-	"remove-custom-tag":  cb("🗑 پاک کردن تگ دلخواه", "rm-custom-tag"),
-	"remove-audio-tag":   cb("🗑 پاک کردن تگ آهنگ", "rm-audio-tag"),
-	"anon-name-set":      cb("✏️ تنظیم / تغییر نام مستعار", "anon-name-set"),
-	"anon-name-remove":   cb("🗑 حذف نام مستعار", "anon-name-remove"),
-	"anon-name-noemoji":  cb("بدون ایموجی", "anon-name-noemoji"),
+	"formatting":           cb("❔قالب بندی چیه", "what-is-formatting"),
+	"back-to-menu":         cb("↪️ بازگشت به منوی اصلی", "settings-menu"),
+	"nvm-back-to-menu":     cb("↪️ بیخیالش برگرد منوی اصلی", "settings-menu"),
+	"wpp-activate":         cb("✅ برگشت به حالت پیشفرض", "wpp|activate"),
+	"wpp-deactivate":       cb("❌ غیرفعال سازی اجباری", "wpp|deactivate"),
+	"warning-activate":     cb("✅ فعالسازی", "warning|activate"),
+	"warning-deactivate":   cb("❌ غیرفعالسازی", "warning|deactivate"),
+	"seen-activate":        cb("✅ فعالسازی", "seen-settings|activate"),
+	"seen-deactivate":      cb("❌ غیرفعالسازی", "seen-settings|deactivate"),
+	"remove-custom-tag":    cb("🗑 پاک کردن تگ دلخواه", "rm-custom-tag"),
+	"remove-audio-tag":     cb("🗑 پاک کردن تگ آهنگ", "rm-audio-tag"),
+	"anon-name-set":        cb("✏️ تنظیم / تغییر نام مستعار", "anon-name-set"),
+	"anon-name-remove":     cb("🗑 حذف نام مستعار", "anon-name-remove"),
+	"anon-name-noemoji":    cb("بدون ایموجی", "anon-name-noemoji"),
+	"name-sync-activate":   cb("✅ فعالسازی", "name-sync|activate"),
+	"name-sync-deactivate": cb("❌ غیرفعالسازی", "name-sync|deactivate"),
 }
 
 // mylinksDefaultMenu mirrors MYLINKS_MARKUP["default-set"].

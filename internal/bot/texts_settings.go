@@ -37,6 +37,13 @@ const (
 	btnAnonActivate     = "✅ فعالسازی"
 	btnAnonDeactivate   = "❌ غیرفعالسازی"
 
+	// display-name syncing (name_sync)
+	txtNameSyncAnswerActivate   = "از این به بعد نام نمایشیت با اسم اکانتت هماهنگ می‌مونه ✅"
+	txtNameSyncAnswerDeactivate = "هم‌گام‌سازی خاموش شد. نام نمایشیت همینی که هست می‌مونه"
+	// Shown after a MANUAL rename that switched syncing off, so the user is not
+	// left wondering why a setting they never touched changed.
+	txtNameSyncTurnedOffByRename = "\n\n<blockquote>🔄 چون اسمو دستی ثبت کردی، هم‌گام‌سازی خودکارِ نام با اکانتت خاموش شد تا این اسم از بین نره. هر وقت خواستی از تنظیمات دوباره روشنش کن.</blockquote>"
+
 	// my_links.py
 	txtMyLinksPromo         = "<blockquote>راستی یادت نره به کانالمون سر بزنی:\n@chevalet_studio</blockquote>"
 	txtAddedNewLink         = "added a new link"
