@@ -32,15 +32,49 @@ func urlBtn(text, url string) gotgbot.InlineKeyboardButton {
 	return gotgbot.InlineKeyboardButton{Text: text, Url: url}
 }
 
-// cancelButton mirrors reply_markups.CANCEL_BUTTON.
-func cancelButton() gotgbot.InlineKeyboardButton { return cb("بیخیالش", "cancel") }
+// btnCancel is the label both cancel buttons share.
+const btnCancel = "بیخیالش"
 
-// cancelMarkup is the single-row [CANCEL_BUTTON] keyboard used by /start connect
-// and the answer prompt.
+// connectAnchorPrefix marks a cancel button that ALSO carries the target's link
+// id. Plain "cancel" (the answer prompt, and every button emitted before this
+// existed) deliberately does not have it.
+const connectAnchorPrefix = "cancel|"
+
+// cancelButton mirrors reply_markups.CANCEL_BUTTON.
+func cancelButton() gotgbot.InlineKeyboardButton { return cb(btnCancel, "cancel") }
+
+// cancelMarkup is the single-row [CANCEL_BUTTON] keyboard used by the answer
+// prompt (and as the connect prompt's fallback, see connectCancelMarkup).
 func cancelMarkup() *gotgbot.InlineKeyboardMarkup {
 	return &gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{cancelButton()}},
 	}
+}
+
+// connectCancelMarkup is the keyboard under the "به X وصل شدی" prompt: the same
+// cancel button, with the target's link id (cid) riding along in its data.
+//
+// WHY THE ID RIDES ALONG. Sending ends the conversation, so writing again meant
+// opening the link a second time. With the id on the button, the prompt doubles
+// as a reusable anchor: replying to it re-resolves the same link (see
+// connectAnchorCid). The cid is the PUBLIC link id the sender just used — it
+// tells them nothing about the target they did not already have, and no real
+// user id is involved, so the anonymity contract is untouched.
+//
+// anchored reports whether the id actually made it onto the button. A cid is
+// user-chosen text of up to MAX_CID_LENGTH, so the data can outgrow Telegram's
+// 64-byte callback limit; rather than have Telegram reject the whole prompt
+// (BUTTON_DATA_INVALID, which would break /start for that link), fall back to
+// the plain button — cancelling still works, the prompt just is not reusable.
+// The caller uses anchored to decide whether to advertise the shortcut.
+func connectCancelMarkup(targetCid string) (markup *gotgbot.InlineKeyboardMarkup, anchored bool) {
+	data := connectAnchorPrefix + targetCid
+	if targetCid == "" || len(data) > 64 {
+		return cancelMarkup(), false
+	}
+	return &gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{cb(btnCancel, data)}},
+	}, true
 }
 
 // messageKeyboard builds the inline keyboard placed under every delivered

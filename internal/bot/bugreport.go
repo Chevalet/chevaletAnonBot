@@ -34,7 +34,11 @@ func (b *Bot) bugComposeFilter(botID int64) filters.Message {
 			m.ReplyToMessage != nil &&
 			m.ReplyToMessage.From != nil &&
 			m.ReplyToMessage.From.Id == botID &&
-			strings.Contains(m.ReplyToMessage.Text, bugMarker)
+			strings.Contains(m.ReplyToMessage.Text, bugMarker) &&
+			// Never a connect prompt: that message prints the TARGET's display name,
+			// so a name spelling the marker would divert their contacts' messages
+			// here. See isConnectAnchor.
+			!isConnectAnchor(m.ReplyToMessage)
 	}
 }
 

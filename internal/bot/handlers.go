@@ -55,6 +55,14 @@ func (b *Bot) registerHandlers() {
 	// match on (see menu.go), so this cannot shadow them either.
 	d.AddHandler(handlers.NewCallback(cqfilters.Prefix("menu|"), b.menuCallback))
 
+	// The connect prompt's cancel button, whose data carries the target's link id.
+	// Registered BEFORE the conversations for the reason spelled out on
+	// cancelConnect: the id is user-chosen text, so it must not be possible for it
+	// to spell one of their cqContains filters and be swallowed. Plain "cancel"
+	// (the answer prompt, and every button emitted before this existed) has no
+	// "|" and still reaches the start conversation's fallback.
+	d.AddHandler(handlers.NewCallback(cqfilters.Prefix(connectAnchorPrefix), b.topLevel(cancelConnect)))
+
 	// A tap on the persistent bar arrives as an ordinary text message, so it must be
 	// claimed BEFORE the start conversation's send state and before the catch-all —
 	// otherwise the label would be delivered as somebody's anonymous message. The

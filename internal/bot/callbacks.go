@@ -514,6 +514,24 @@ func cancel(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, _ string) error {
 	return handlers.EndConversation()
 }
 
+// cancelConnect is the connect prompt's cancel button, whose data carries the
+// target's link id ("cancel|<cid>", see connectCancelMarkup).
+//
+// It is registered OUTSIDE the conversations and AHEAD of them, because that id
+// is user-chosen text: a link renamed to something like "alread-seen" or
+// "add-link" would otherwise be matched by one of the conversations' cqContains
+// filters, and the button would quietly do the wrong thing. A Prefix("cancel|")
+// handler registered first cannot be shadowed by any of them, whatever the cid
+// spells. Plain "cancel" is untouched and still reaches the fallback below.
+//
+// Being outside a conversation it cannot end one by returning (topLevel swallows
+// that), so it drops the pending state explicitly — the same pattern menuCallback
+// uses.
+func cancelConnect(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
+	b.dropConversations(ctx)
+	return cancel(b, tg, ctx, userid)
+}
+
 // cancelAll ports start.cancel_all: the conversation fallback for any stray
 // message while composing.
 func cancelAll(b *Bot, _ *gotgbot.Bot, ctx *ext.Context, _ string) error {

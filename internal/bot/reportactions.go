@@ -395,7 +395,11 @@ func (b *Bot) rptComposeFilter(botID int64) filters.Message {
 			m.ReplyToMessage != nil &&
 			m.ReplyToMessage.From != nil &&
 			m.ReplyToMessage.From.Id == botID &&
-			strings.Contains(m.ReplyToMessage.Text, composeMarker)
+			strings.Contains(m.ReplyToMessage.Text, composeMarker) &&
+			// Never a connect prompt: that message prints the TARGET's display name,
+			// so a name spelling the marker would divert their contacts' messages
+			// here. See isConnectAnchor.
+			!isConnectAnchor(m.ReplyToMessage)
 	}
 }
 
