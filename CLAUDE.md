@@ -24,6 +24,12 @@ go test ./...                    # encoder golden vectors + rest; DB tests skip 
 go test -race -count=1 ./...     # what CI actually runs — run this before every PR
 go test ./internal/encoder/...   # single package
 go test ./internal/bot/ -run TestSendMsg   # single test
+
+# End-to-end handler-routing tests (real dispatcher + fake Bot API). They need
+# their OWN database, separate from the one the db tests drop tables in:
+#   docker exec <pg> createdb -U <user> botit
+#   DB_HOST=localhost DB_PORT=55432 BOT_TEST_DB=botit DB_USER=… DB_PASS=… \
+#     go test ./internal/bot/ -run TestAnchor
 go run ./cmd/bot      # needs a populated .env + reachable PostgreSQL (+ PROXY)
 ```
 

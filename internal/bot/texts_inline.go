@@ -89,7 +89,11 @@ const (
 
 	// start connect prompt fragments
 	txtConnectSelf = "میخوای با خودت صحبت کنی؟ :) عب نداره راحت باش."
-	txtConnectBody = "<blockquote>میدونستی میتونی بدون استفاده از لینک، فقط با ریپلای کردن به کانال پیام بدی؟ منوی قابلیت ها و تنظیمات رو چک کن ؛)</blockquote>"
+	// The connect prompt doubles as a reusable anchor (its cancel button carries
+	// the link id — see connectCancelMarkup), so it says so. Only shown when the
+	// id actually fit on the button.
+	txtConnectAnchorHint = "<i>برای پیام بعدی هم کافیه همین پیام رو ریپلای کنی؛ دیگه لازم نیست از لینک بری.</i>"
+	txtConnectBody       = "<blockquote>میدونستی میتونی بدون استفاده از لینک، فقط با ریپلای کردن به کانال پیام بدی؟ منوی قابلیت ها و تنظیمات رو چک کن ؛)</blockquote>"
 
 	// unblock-me-again button on /start UNBLOCK reply
 	btnBlockAgain = "پشیمون شدم دوباره بلاکش کن خخ"

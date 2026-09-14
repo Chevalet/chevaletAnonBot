@@ -181,10 +181,20 @@ func (b *Bot) startConnect(tg *gotgbot.Bot, ctx *ext.Context, userid, targetCid 
 	if targetUID == userid {
 		selfPrefix = txtConnectSelf
 	}
-	text := selfPrefix + "\nبه " + sanitizeUserHTML(name) + " وصل شدی. پیامتو بفرست\n\n" + txtConnectBody
+	// The cancel button carries targetCid, which turns this prompt into a reusable
+	// anchor: once the message is sent the conversation ends, and replying to this
+	// message is how the sender writes again without going back through the link
+	// (connectAnchorCid resolves it). Only advertise that when the id actually fit
+	// on the button.
+	markup, anchored := connectCancelMarkup(targetCid)
+	hint := ""
+	if anchored {
+		hint = txtConnectAnchorHint + "\n"
+	}
+	text := selfPrefix + "\nبه " + sanitizeUserHTML(name) + " وصل شدی. پیامتو بفرست\n" + hint + "\n" + txtConnectBody
 	if _, err := msg.Reply(tg, text, &gotgbot.SendMessageOpts{
 		ParseMode:   "HTML",
-		ReplyMarkup: *cancelMarkup(),
+		ReplyMarkup: *markup,
 	}); err != nil {
 		return err
 	}

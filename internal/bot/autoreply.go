@@ -7,6 +7,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
+	msgfilters "github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
 
 	"github.com/aturzone/chevaletAnonBot/internal/encoder"
 )
@@ -247,11 +248,134 @@ func firstURLButtonCID(re *regexp.Regexp, keyboard [][]gotgbot.InlineKeyboardBut
 	return ""
 }
 
+// anchorCidOf pulls the link id off a message's cancel button, identifying it as
+// a connect prompt. The id comes from the keyboard Telegram echoes back, never
+// from anything a user typed.
+//
+// ok is false for everything else, including the answer prompt's plain "cancel"
+// button — that one carries no id and is not an anchor.
+func anchorCidOf(m *gotgbot.Message) (string, bool) {
+	if m == nil || m.ReplyMarkup == nil {
+		return "", false
+	}
+	for _, r := range m.ReplyMarkup.InlineKeyboard {
+		for _, btn := range r {
+			if cid, found := strings.CutPrefix(btn.CallbackData, connectAnchorPrefix); found && cid != "" {
+				return cid, true
+			}
+		}
+	}
+	return "", false
+}
+
+// isConnectAnchor reports whether a message is a connect prompt.
+//
+// The two compose filters (bug report, admin report reply) are registered ahead
+// of everything and claim a reply by searching the replied-to message's TEXT for
+// a marker. A connect prompt prints the target's display name, which that target
+// chooses — so a name containing "ref:bug" made every reply to their prompt land
+// in the report channel instead of being delivered. Those filters now exclude an
+// anchor, which their own prompts (ForceReply, no inline keyboard) can never be.
+func isConnectAnchor(m *gotgbot.Message) bool {
+	_, ok := anchorCidOf(m)
+	return ok
+}
+
+// connectAnchorCid reads a target's link id back off the message this one
+// replies to, when that message is a connect prompt THIS bot sent (its cancel
+// button carries "cancel|<cid>", see connectCancelMarkup).
+func (b *Bot) connectAnchorCid(ctx *ext.Context) (string, bool) {
+	reply := ctx.EffectiveMessage.ReplyToMessage
+	if reply == nil || reply.From == nil || reply.From.Id != b.TG.User.Id {
+		return "", false
+	}
+	return anchorCidOf(reply)
+}
+
+// sendViaConnectAnchor sends this message through the link id taken off a
+// connect prompt, re-resolving it exactly as a fresh /start <cid> would: same
+// link-still-valid, blocked and banned checks in the same order, so a target who
+// has since renamed the link, blocked the sender or been banned is as
+// unreachable through the anchor as through the link itself. The anchor is a
+// shortcut past the link, never past its gates.
+func (b *Bot) sendViaConnectAnchor(ctx *ext.Context, userid, targetCid string) (bool, error) {
+	dbctx, cancel := b.bg()
+	defer cancel()
+
+	targetUID, err := b.DB.GetUIDByCID(dbctx, targetCid)
+	if err != nil {
+		return false, err
+	}
+	if targetUID == "" {
+		return true, b.replyText(ctx, txtLinkDeletedOrChanged)
+	}
+
+	// Same side effect as startConnect: mint a chevaletid if the target has none,
+	// for any legacy path that still resolves by one.
+	targetChid, err := b.DB.GetChevaletIDByUID(dbctx, targetUID)
+	if err != nil {
+		return false, err
+	}
+	if targetChid == "" {
+		if err := b.DB.SetChevaletID(dbctx, targetUID, encoder.GenerateChevaletID()); err != nil {
+			return false, err
+		}
+	}
+
+	blocked, err := b.DB.IsBlocked(dbctx, targetUID, userid)
+	if err != nil {
+		return false, err
+	}
+	if blocked {
+		return true, b.replyText(ctx, txtBlockedYou)
+	}
+
+	banned, err := b.DB.IsBanned(dbctx, targetUID)
+	if err != nil {
+		return false, err
+	}
+	if banned {
+		return true, b.replyText(ctx, txtUserBanned)
+	}
+
+	ud := b.ud(ctx)
+	ud.d.targetCid = targetCid
+	ud.d.targetUID = targetUID
+	ud.d.replyTo = ""
+	ud.d.channelReply = false
+	if _, e := b.sendMsgTemplate(ctx, userid); e != nil {
+		return false, e
+	}
+	return true, nil
+}
+
 // checkIfAutoreply ports handler_templates.check_if_autoreply: it tries the
 // private-reply path (is_answer) then the channel-reply path (is_reply_to_channel),
 // and on a match stashes the target and runs send_msg_template. handled=true is
 // the Python END return (something was handled); false falls through.
 func (b *Bot) checkIfAutoreply(ctx *ext.Context, userid string) (handled bool, err error) {
+	// A reply to a connect prompt, whose cancel button carries the target's link
+	// id: the prompt doubles as a reusable anchor, so replying to it sends through
+	// that link again instead of the sender having to reopen it.
+	//
+	// Checked BEFORE isAnswer, which sees a bot message with no "answer|" button
+	// and would answer the reply with "reply to the anonymous message itself".
+	//
+	// Note this runs only from the catch-all (and handleMedia), i.e. only when no
+	// conversation state claimed the update. That is what stops the double send:
+	// while the bot is still waiting for the message, the start conversation's
+	// send state has first refusal on it and this path is never reached, so a
+	// reply to the prompt the sender just received is delivered exactly once.
+	if targetCid, ok := b.connectAnchorCid(ctx); ok {
+		// A command is a command, even in a reply. Fall through so its own handler
+		// — or, for one the bot does not know, the "didn't understand" reply — runs
+		// instead of the command being delivered to the target as a message.
+		if msgfilters.Command(ctx.EffectiveMessage) {
+			return false, nil
+		}
+		return b.sendViaConnectAnchor(ctx, userid, targetCid)
+	}
+
 	// private reply
 	kind, targetUID, mid, err := b.isAnswer(ctx, true)
 	if err != nil {
