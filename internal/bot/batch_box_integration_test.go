@@ -19,11 +19,23 @@ import (
 // Skipped unless DB_HOST and BOT_TEST_DB are set (see anchor_integration_test.go
 // for the docker command).
 
-// enableBatching installs a batcher with a short window (tests must not sleep for
-// the production 800ms) and shuts it down at the end of the test.
+// enableBatching installs a short window for ordinary messages AND albums (tests
+// must not sleep for the production 800ms/600ms) and shuts the queue down at the end.
 func (h *harness) enableBatching(window, maxWait time.Duration, maxItems int) {
 	h.t.Helper()
-	h.b.batcher = newBatcher(window, maxWait, maxItems, h.b.deliverBatch)
+	h.enableQueue(window, window, maxWait, maxItems)
+}
+
+// enableQueue configures the conversation delivery queue explicitly.
+func (h *harness) enableQueue(window, albumWindow, maxWait time.Duration, maxItems int) {
+	h.t.Helper()
+	old := h.b.batcher
+	if old != nil {
+		old.Shutdown(time.Second)
+	}
+	h.b.Cfg.BatchWindow = window
+	h.b.Cfg.AlbumWindow = albumWindow
+	h.b.batcher = newBatcher(window, albumWindow, maxWait, maxItems, h.b.deliverUnits)
 	h.t.Cleanup(func() { h.b.batcher.Shutdown(2 * time.Second) })
 }
 
@@ -221,11 +233,11 @@ func TestBatchDoesNotMergeAcrossConversations(t *testing.T) {
 	}
 }
 
-// TestBatchFlushesBeforeAlbumPreservesOrder: a buffered text must be delivered
-// BEFORE an immediately-handled album, even though the album is not batched.
+// TestBatchFlushesBeforeAlbumPreservesOrder: a text and an album sent in the same
+// burst are delivered in arrival order — text first, then the complete gallery.
 func TestBatchFlushesBeforeAlbumPreservesOrder(t *testing.T) {
 	h := newHarness(t)
-	h.enableBatching(10*time.Second, 10*time.Second, 10) // never timed out during the test
+	h.enableQueue(50*time.Millisecond, 50*time.Millisecond, time.Second, 10)
 
 	recipient := newUID()
 	sender := newUID()
@@ -828,5 +840,241 @@ func TestStartOpensMainMenuLikeMenu(t *testing.T) {
 	}
 	if !strings.Contains(startCall.params["reply_markup"], "settings-menu") {
 		t.Errorf("/start did not produce the main menu keyboard: %q", startCall.params["reply_markup"])
+	}
+}
+
+// --- replies are batched too (Hamid round 3) -----------------------------------
+
+// deliveredMessageTo rebuilds the bot's delivered message in a recipient's chat from
+// the recorded CopyMessage call (chat id + keyboard). A reply to it exercises the
+// real answer flow exactly like a user tapping the keyboard.
+func (h *harness) deliveredMessageTo(uid int64) *gotgbot.Message {
+	h.t.Helper()
+	var latest *apiCall
+	for _, c := range h.callsTo(0, "copyMessage", uid) {
+		cc := c
+		latest = &cc
+	}
+	if latest == nil {
+		h.t.Fatalf("no delivered message recorded for %d", uid)
+	}
+	var kb gotgbot.InlineKeyboardMarkup
+	if err := json.Unmarshal([]byte(latest.params["reply_markup"]), &kb); err != nil {
+		h.t.Fatalf("decode delivered keyboard: %v", err)
+	}
+	return &gotgbot.Message{
+		MessageId:   h.mid.Add(1),
+		From:        &gotgbot.User{Id: fakeBotID, IsBot: true, Username: "chevalet_test_bot"},
+		Chat:        gotgbot.Chat{Id: uid, Type: "private"},
+		Text:        "delivered",
+		ReplyMarkup: &kb,
+	}
+}
+
+// TestRepliesAreBatched: several quick replies to delivered messages go to the
+// original sender as ONE delivery pass (two copies, one confirmation), instead of
+// one by one.
+func TestRepliesAreBatched(t *testing.T) {
+	h := newHarness(t)
+	h.enableBatching(50*time.Millisecond, 500*time.Millisecond, 10)
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	prompt := h.connect(sender, h.linkOf(recipient))
+	h.send(sender, "پیام اولیه", prompt)
+	h.waitFor(3*time.Second, "the delivered message", func() bool {
+		return len(h.callsTo(0, "copyMessage", recipient)) >= 1
+	})
+	delivered := h.deliveredMessageTo(recipient)
+
+	mark := h.tg.mark()
+	h.send(recipient, "جواب اول", delivered)
+	h.send(recipient, "جواب دوم", delivered)
+
+	h.waitFor(3*time.Second, "both replies delivered to the sender", func() bool {
+		return len(h.callsTo(mark, "copyMessage", sender)) == 2
+	})
+	replies := h.callsTo(mark, "copyMessage", sender)
+	senderStr := strconv.FormatInt(sender, 10)
+	for i, c := range replies {
+		if c.params["from_chat_id"] != strconv.FormatInt(recipient, 10) {
+			t.Errorf("reply %d came from %s; want the recipient's chat", i, c.params["from_chat_id"])
+		}
+		if !strings.Contains(c.params["reply_parameters"], senderStr) {
+			t.Errorf("reply %d does not quote the sender's message: %s", i, c.params["reply_parameters"])
+		}
+	}
+	for _, c := range h.callsTo(mark, "copyMessage", sender) {
+		if c.params["reply_parameters"] == "" {
+			t.Errorf("a batched reply lost its reply context")
+		}
+	}
+	h.waitFor(2*time.Second, "the batch confirmation", func() bool {
+		return len(h.messagesWithText(mark, recipient, txtSentToThem)) == 1
+	})
+	if got := len(h.messagesWithText(mark, recipient, txtSentToThem)); got != 1 {
+		t.Errorf("reply confirmations to the replier = %d; want 1 for the batch", got)
+	}
+	if got := h.messagesWithText(mark, recipient, txtNotUnderstood); len(got) != 0 {
+		t.Errorf("a reply was rejected as 'didn't understand'")
+	}
+}
+
+// --- gallery: one copy pass, and one box notification for album+extra ------------
+
+// TestGalleryCopiedOnceWithoutDeleteLoop: an album is copied in exactly one
+// CopyMessages call; the old delete-and-re-copy loop produces no deleteMessages.
+func TestGalleryCopiedOnceWithoutDeleteLoop(t *testing.T) {
+	h := newHarness(t)
+	h.enableQueue(0, 40*time.Millisecond, 2*time.Second, 10) // singles immediate, albums buffered
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	prompt := h.connect(sender, h.linkOf(recipient))
+
+	mark := h.tg.mark()
+	h.sendPhoto(sender, "g-once", prompt)
+	h.sendPhoto(sender, "g-once", prompt)
+	h.sendPhoto(sender, "g-once", prompt)
+
+	h.waitFor(3*time.Second, "the gallery", func() bool {
+		return len(h.callsTo(mark, "copyMessages", recipient)) == 1
+	})
+	time.Sleep(120 * time.Millisecond)
+	if got := len(h.callsTo(mark, "copyMessages", recipient)); got != 1 {
+		t.Errorf("copyMessages calls = %d; want exactly 1", got)
+	}
+	if got := len(h.callsTo(mark, "copyMessage", recipient)); got != 0 {
+		t.Errorf("gallery produced %d single copies; want 0", got)
+	}
+	if got := len(h.callsTo(mark, "deleteMessages", recipient)); got != 0 {
+		t.Errorf("gallery produced %d deleteMessages; want 0 (no re-copy loop)", got)
+	}
+}
+
+// TestBoxAlbumPlusSingleNotifiesOnce: an album (2 photos) plus one standalone photo
+// sent in one burst produces ONE message-box notification carrying the total (3) —
+// not one per item.
+func TestBoxAlbumPlusSingleNotifiesOnce(t *testing.T) {
+	h := newHarness(t)
+	h.enableQueue(60*time.Millisecond, 60*time.Millisecond, 600*time.Millisecond, 10)
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	prompt := h.connect(sender, h.linkOf(recipient))
+	h.setMessageBox(recipient, true)
+
+	mark := h.tg.mark()
+	h.sendPhoto(sender, "box-g", prompt) // album item 1
+	h.sendPhoto(sender, "box-g", prompt) // album item 2
+	h.sendPhoto(sender, "", prompt)      // standalone photo (no media group)
+
+	h.waitFor(3*time.Second, "all three stored in the box", func() bool {
+		return h.pendingBox(recipient) == 3
+	})
+	h.waitFor(2*time.Second, "the box notification", func() bool {
+		return len(h.messagesWithText(mark, recipient, "پیام جدید")) >= 1
+	})
+	time.Sleep(120 * time.Millisecond) // any (buggy) extra notification would land now
+	notifs := h.messagesWithText(mark, recipient, "پیام جدید")
+	if len(notifs) != 1 {
+		t.Fatalf("box notifications = %d; want exactly 1 (with the total count)", len(notifs))
+	}
+	var kb gotgbot.InlineKeyboardMarkup
+	if err := json.Unmarshal([]byte(notifs[0].params["reply_markup"]), &kb); err != nil {
+		t.Fatalf("decode notification keyboard: %v", err)
+	}
+	if label := kb.InlineKeyboard[0][0].Text; !strings.Contains(label, "(3)") {
+		t.Errorf("notification button = %q; want the total count (3)", label)
+	}
+
+	// Opening the box: album stays a gallery, single photo arrives as itself.
+	notification := h.boxNotification(recipient)
+	mark = h.tg.mark()
+	h.press(recipient, notification, mboxOpenData)
+	h.waitFor(3*time.Second, "the box contents delivered", func() bool {
+		return len(h.callsTo(mark, "copyMessages", recipient)) == 1 &&
+			len(h.callsTo(mark, "copyMessage", recipient)) == 1
+	})
+	if got := h.pendingBox(recipient); got != 0 {
+		t.Errorf("pending rows after opening = %d; want 0", got)
+	}
+}
+
+// TestReplyThenPlainBatchTogether: a reply and a plain message typed straight after
+// it (same conversation) are delivered as one batch in arrival order — the reply
+// with its reply context, the plain message without.
+func TestReplyThenPlainBatchTogether(t *testing.T) {
+	h := newHarness(t)
+	h.enableBatching(50*time.Millisecond, 500*time.Millisecond, 10)
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	prompt := h.connect(sender, h.linkOf(recipient))
+	h.send(sender, "پیام اولیه", prompt)
+	h.waitFor(3*time.Second, "the delivered message", func() bool {
+		return len(h.callsTo(0, "copyMessage", recipient)) >= 1
+	})
+	delivered := h.deliveredMessageTo(recipient)
+
+	mark := h.tg.mark()
+	h.send(recipient, "جواب", delivered)
+	h.send(recipient, "و یه پیام دیگه", nil) // continuation: same recipient
+
+	h.waitFor(3*time.Second, "both items delivered to the sender", func() bool {
+		return len(h.callsTo(mark, "copyMessage", sender)) == 2
+	})
+	replies := h.callsTo(mark, "copyMessage", sender)
+	if len(replies) != 2 {
+		t.Fatalf("copies = %d; want 2", len(replies))
+	}
+	if replies[0].params["reply_parameters"] == "" {
+		t.Errorf("the first (reply) copy lost its reply context")
+	}
+	if replies[1].params["reply_parameters"] != "" {
+		t.Errorf("the plain follow-up unexpectedly carries reply context: %s", replies[1].params["reply_parameters"])
+	}
+}
+
+// TestAlbumReplyIsBatched: an album sent as a reply still becomes one gallery plus a
+// carrier that replies to the original message.
+func TestAlbumReplyIsBatched(t *testing.T) {
+	h := newHarness(t)
+	h.enableQueue(50*time.Millisecond, 50*time.Millisecond, time.Second, 10)
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	prompt := h.connect(sender, h.linkOf(recipient))
+	h.send(sender, "پیام اولیه", prompt)
+	h.waitFor(3*time.Second, "the delivered message", func() bool {
+		return len(h.callsTo(0, "copyMessage", recipient)) >= 1
+	})
+	delivered := h.deliveredMessageTo(recipient)
+
+	mark := h.tg.mark()
+	h.sendPhoto(recipient, "reply-album", delivered)
+	h.sendPhoto(recipient, "reply-album", delivered)
+
+	h.waitFor(3*time.Second, "the reply album", func() bool {
+		return len(h.callsTo(mark, "copyMessages", sender)) == 1
+	})
+	if got := len(h.callsTo(mark, "copyMessage", sender)); got != 0 {
+		t.Errorf("album reply produced %d standalone copies; want 0", got)
+	}
+	// The carrier message must carry the reply context (sender's message id quoted).
+	h.waitFor(2*time.Second, "the album carrier", func() bool {
+		return len(h.messagesWithText(mark, sender, txtMediaUseThis)) == 1
+	})
+	carriers := h.messagesWithText(mark, sender, txtMediaUseThis)
+	if len(carriers) != 1 {
+		t.Fatalf("album carrier messages = %d; want 1", len(carriers))
+	}
+	if !strings.Contains(carriers[0].params["reply_parameters"], strconv.FormatInt(sender, 10)) {
+		t.Errorf("album carrier lost its reply context: %s", carriers[0].params["reply_parameters"])
 	}
 }

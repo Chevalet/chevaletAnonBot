@@ -15,6 +15,7 @@ func TestBatchDefaults(t *testing.T) {
 	t.Setenv("BATCH_MAX_WAIT_MS", "")
 	t.Setenv("BATCH_MAX_MESSAGES", "")
 	t.Setenv("CONTINUE_WINDOW_MS", "")
+	t.Setenv("ALBUM_WINDOW_MS", "")
 
 	c, err := Load()
 	if err != nil {
@@ -32,6 +33,9 @@ func TestBatchDefaults(t *testing.T) {
 	if c.ContinueWindow != 6*time.Second {
 		t.Errorf("ContinueWindow = %s; want 6s", c.ContinueWindow)
 	}
+	if c.AlbumWindow != 600*time.Millisecond {
+		t.Errorf("AlbumWindow = %s; want 600ms", c.AlbumWindow)
+	}
 }
 
 // TestBatchOverrides: each knob is configurable and parsed as documented.
@@ -41,6 +45,7 @@ func TestBatchOverrides(t *testing.T) {
 	t.Setenv("BATCH_MAX_WAIT_MS", "4000")
 	t.Setenv("BATCH_MAX_MESSAGES", "3")
 	t.Setenv("CONTINUE_WINDOW_MS", "1500")
+	t.Setenv("ALBUM_WINDOW_MS", "900")
 
 	c, err := Load()
 	if err != nil {
@@ -57,6 +62,9 @@ func TestBatchOverrides(t *testing.T) {
 	}
 	if c.ContinueWindow != 1500*time.Millisecond {
 		t.Errorf("ContinueWindow = %s; want 1.5s", c.ContinueWindow)
+	}
+	if c.AlbumWindow != 900*time.Millisecond {
+		t.Errorf("AlbumWindow = %s; want 900ms", c.AlbumWindow)
 	}
 }
 
@@ -88,6 +96,7 @@ func TestBatchInvalidValues(t *testing.T) {
 		"BATCH_MAX_WAIT_MS":  "-5",
 		"BATCH_MAX_MESSAGES": "0",
 		"CONTINUE_WINDOW_MS": "nope",
+		"ALBUM_WINDOW_MS":    "bad",
 	}
 	for key, value := range cases {
 		key, value := key, value

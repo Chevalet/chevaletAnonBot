@@ -172,7 +172,7 @@ func New(cfg *config.Config, database *db.DB, txt *texts.Loader) (*Bot, error) {
 		limiter:    limiter,
 	}
 	// Wired after b exists: the flush path is a method on b.
-	b.batcher = newBatcher(cfg.BatchWindow, cfg.BatchMaxWait, cfg.BatchMaxMessages, b.deliverBatch)
+	b.batcher = newBatcher(cfg.BatchWindow, cfg.AlbumWindow, cfg.BatchMaxWait, cfg.BatchMaxMessages, b.deliverUnits)
 	for _, a := range cfg.Admins {
 		b.admins[a] = true
 	}

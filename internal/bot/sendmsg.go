@@ -147,85 +147,61 @@ func (b *Bot) sendMsgCore(ctx *ext.Context, userid string) (string, error) {
 
 	// ── batching / message-box routing ─────────────────────────────────────────
 	// Every per-message check above (session, link, answer-match, block) has passed,
-	// so the message is deliverable. What happens next depends on the recipient's
-	// Message Box setting and on whether this message can be grouped:
+	// so the message is deliverable. From here it joins the conversation's delivery
+	// queue (batcher.go), which waits out the debounce window and then delivers the
+	// whole burst in one ordered pass — replies carry their reply context, an album
+	// is copied ONCE as a complete media group, and the sender gets one confirmation.
 	//
-	//   box ON            -> persist it (and the rest of its album) and ping the
-	//                        recipient instead of delivering now. The pending batch of
-	//                        this conversation is flushed first, so an older buffered
-	//                        message can never be stored after a newer immediate one.
-	//   box OFF, groupable -> buffer it for the debounce window (batcher.go).
-	//   otherwise          -> deliver immediately, as before; flush the buffered batch
-	//                        first to preserve order (answer, album or channel reply).
+	// Channel replies keep the legacy immediate path (external "new answer" notice,
+	// admin-of-channel check, inline-link fallback): they are rare, already look
+	// nothing like an ordinary message to the recipient, and the queue cannot carry
+	// that flow's extra notification message. The pending queue is flushed first so
+	// ordering stays correct.
 	key := convKey{senderUID: userid, targetUID: targetUID}
-	groupable := targetMid == "" && !wasChannelReply && mediaGroupID == "" && externalReply == nil
 
-	// Buffering comes FIRST, even when the recipient's box is on: the flush decides
-	// whether to deliver or store the burst, and a burst therefore becomes one store
-	// event (one "new messages" notification carrying the whole count) instead of a
-	// ping per message. The box check below still covers the immediate paths
-	// (answers, albums, channel replies) and the batching-disabled mode.
-	if groupable && b.batcher != nil && b.batcher.Enabled() {
-		ud.noteSentTarget(targetUID, targetCid)
-		ud.clear()
-		b.batcher.Add(key, batchItem{msg: msg, targetCid: targetCid})
-		return delNone, nil
+	reply := batchReply{channel: wasChannelReply}
+	if targetMid != "" {
+		reply.targetMid = targetMid
+		reply.quoteText = quoteTextForBox(msg)
+		reply.quotePos = quotePositionForBox(msg)
+	}
+	if externalReply != nil && externalReply.Chat != nil {
+		reply.externalChat = externalReply.Chat.Id
+		reply.externalMid = externalReply.MessageId
+		reply.externalUsername = externalReply.Chat.Username
+		reply.quoteText = quoteTextForBox(msg)
+		reply.quotePos = quotePositionForBox(msg)
 	}
 
-	boxOn := b.boxEnabled(dbctx, targetUID)
-
-	if boxOn {
-		b.flushPendingBatch(key)
-		in := boxIncoming{
-			msg:              msg,
-			targetCid:        targetCid,
-			quoteText:        quoteTextForBox(msg),
-			quotePosition:    quotePositionForBox(msg),
-			externalReply:    externalReply != nil,
-			channelReply:     wasChannelReply,
-			replyToChatID:    boxReplyChat(targetUID, targetMid, externalReply),
-			replyToMessageID: boxReplyMID(targetMid, externalReply),
-		}
+	if externalReply == nil && !wasChannelReply {
 		if mediaGroupID != "" {
-			// The first item of an album: stash the album state exactly like the
-			// immediate path, but remember that this album belongs to the box, so the
-			// remaining items are stored by handleMedia instead of being copied.
+			// First item of a gallery: buffer it and remember the conversation state so
+			// the remaining items (handle_media) join the SAME album unit.
+			b.batcher.AddAlbumItem(key, mediaGroupID, msg, targetCid, reply)
 			ud.d.mediaGroupID = mediaGroupID
 			ud.d.groupMsgs = []*gotgbot.Message{msg}
 			ud.d.groupExpiration = nowSeconds() + config.ExpireAfter
 			ud.d.groupTargetUID = targetUID
-			ud.d.groupWasChannelReply = wasChannelReply
-			ud.d.groupBoxOn = true
-			ud.d.groupBoxTargetCid = targetCid
+			ud.d.groupTargetCid = targetCid
+			ud.d.groupReplyTo = targetMid
+			ud.d.groupQuoteText = reply.quoteText
+			ud.d.groupQuotePos = reply.quotePos
 		} else {
+			b.batcher.AddSingle(key, batchItem{msg: msg, targetCid: targetCid}, reply)
 			ud.clear()
 		}
-		if err := b.storeBoxIncoming(dbctx, targetUID, userid, []boxIncoming{in}); err != nil {
-			return "", err
-		}
-		if targetMid == "" && !wasChannelReply {
-			// A follow-up typed before the conversation state ends goes to the same
-			// recipient instead of the catch-all.
-			ud.noteSentTarget(targetUID, targetCid)
-		}
-		// One confirmation per incoming message/album-item. The recipient-side
-		// notification is sent per stored message/album-item (with the pending count).
-		if e := b.replyText(ctx, txtSentToTheirBox); e != nil {
-			return "", e
-		}
+		// Open the CONTINUE_WINDOW for this conversation too: the next message typed
+		// straight after it goes to the same recipient, whether this send was a plain
+		// message or a reply (the reply path used to leave a follow-up stranded with
+		// "متوجه نشدم").
+		ud.noteSentTarget(targetUID, targetCid)
 		return delNone, nil
 	}
 
-	// Immediate path: make sure nothing older is still buffered for this conversation.
+	// Legacy immediate path for external/channel replies: make sure nothing older is
+	// still buffered for this conversation, then continue below.
 	b.flushPendingBatch(key)
-
-	// Remember the conversation for CONTINUE_WINDOW: once this send finishes the
-	// conversation state ends, so a second message typed straight after it would
-	// otherwise fall through to the catch-all ("متوجه نشدم"). Channels/answers keep
-	// their own explicit targeting and are not remembered.
-	if targetMid == "" && !wasChannelReply && externalReply == nil {
-		ud.noteSentTarget(targetUID, targetCid)
-	}
+	ud.noteSentTarget(targetUID, targetCid)
 
 	// Seal the SENDER's uid into opaque, unlinkable tokens for the message's
 	// buttons — replaces the keyless EncodeChevaletID, which was reversible by any

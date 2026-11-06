@@ -9,31 +9,26 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 )
 
-// These tests exercise the buffering/debounce machinery directly (no DB, no
-// Telegram): grouping, caps, per-conversation isolation, ordering flush, shutdown
-// flush and the disabled mode. The end-to-end delivery behaviour is covered by
-// batch_box_integration_test.go.
+// Tests for the per-conversation delivery queue in isolation (no DB, no Telegram):
+// grouping (messages + replies + albums), caps, per-conversation isolation,
+// ordering, reply context, shutdown flush and the disabled modes. Delivery behaviour
+// is covered end-to-end in batch_box_integration_test.go.
 
-// flushRecord is one batch handed to the flush callback.
 type flushRecord struct {
 	key   convKey
-	items []batchItem
+	units []queueUnit
 }
 
-// recorder collects flush callbacks in a thread-safe channel for assertion.
 type recorder struct {
-	mu     sync.Mutex
-	nextID int64
-	ch     chan flushRecord
+	ch chan flushRecord
 }
 
 func newRecorder() *recorder { return &recorder{ch: make(chan flushRecord, 64)} }
 
-func (r *recorder) flush(key convKey, items []batchItem) {
-	r.ch <- flushRecord{key: key, items: items}
+func (r *recorder) flush(key convKey, units []queueUnit) {
+	r.ch <- flushRecord{key: key, units: units}
 }
 
-// next waits for one flush record.
 func (r *recorder) next(t *testing.T, timeout time.Duration) flushRecord {
 	t.Helper()
 	select {
@@ -45,103 +40,96 @@ func (r *recorder) next(t *testing.T, timeout time.Duration) flushRecord {
 	}
 }
 
-// expectNoFlush asserts no flush arrives within d.
 func (r *recorder) expectNoFlush(t *testing.T, d time.Duration) {
 	t.Helper()
 	select {
 	case rec := <-r.ch:
-		t.Fatalf("unexpected flush: key=%+v items=%d", rec.key, len(rec.items))
+		t.Fatalf("unexpected flush: key=%+v units=%d", rec.key, len(rec.units))
 	case <-time.After(d):
 	}
 }
 
-// dummyMessage builds a message with an id; the batcher never inspects content.
-func dummyMessage(id int64) *gotgbot.Message {
-	return &gotgbot.Message{MessageId: id}
-}
+func dummyMessage(id int64) *gotgbot.Message { return &gotgbot.Message{MessageId: id} }
 
 func keyFor(a, b string) convKey { return convKey{senderUID: a, targetUID: b} }
 
-func testBatcher(window, maxWait time.Duration, maxItems int, rec *recorder) *batcher {
-	return newBatcher(window, maxWait, maxItems, rec.flush)
+func totalMsgs(units []queueUnit) int {
+	n := 0
+	for _, u := range units {
+		n += len(u.msgs)
+	}
+	return n
 }
 
-// TestBatcherGroupsBurst: several rapid messages to one conversation arrive as ONE
+func testBatcher(window, albumWindow time.Duration, rec *recorder) *batcher {
+	return newBatcher(window, albumWindow, time.Second, 100, rec.flush)
+}
+
+// TestQueueGroupsBurst: several rapid messages to one conversation arrive as ONE
 // flush holding all of them, in arrival order.
-func TestBatcherGroupsBurst(t *testing.T) {
+func TestQueueGroupsBurst(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(60*time.Millisecond, time.Second, 10, rec)
-	defer b.Shutdown(time.Second)
+	q := testBatcher(60*time.Millisecond, 25*time.Millisecond, rec)
+	defer q.Shutdown(time.Second)
 	key := keyFor("sender", "target")
 
 	for i := 1; i <= 3; i++ {
-		b.Add(key, batchItem{msg: dummyMessage(int64(i))})
+		q.AddSingle(key, batchItem{msg: dummyMessage(int64(i))}, batchReply{})
 	}
 	got := rec.next(t, 2*time.Second)
 	if got.key != key {
 		t.Fatalf("flush key = %+v; want %+v", got.key, key)
 	}
-	if len(got.items) != 3 {
-		t.Fatalf("flush carried %d items; want 3", len(got.items))
+	if len(got.units) != 3 {
+		t.Fatalf("flush carried %d units; want 3 singles", len(got.units))
 	}
-	for i, it := range got.items {
-		if it.msg.MessageId != int64(i+1) {
-			t.Errorf("item %d id = %d; want %d (arrival order)", i, it.msg.MessageId, i+1)
+	for i, u := range got.units {
+		if u.kind != unitSingle || u.msgs[0].MessageId != int64(i+1) {
+			t.Errorf("unit %d = %+v; want single message %d (arrival order)", i, u, i+1)
 		}
 	}
 }
 
-// TestBatcherSeparatesPauses: a pause longer than the window ends the batch; the
-// next message becomes a new one (an intentional separate message is not merged).
-func TestBatcherSeparatesPauses(t *testing.T) {
+// TestQueueSeparatesPauses: a pause longer than the window ends the burst.
+func TestQueueSeparatesPauses(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(40*time.Millisecond, time.Second, 10, rec)
-	defer b.Shutdown(time.Second)
+	q := testBatcher(40*time.Millisecond, 20*time.Millisecond, rec)
+	defer q.Shutdown(time.Second)
 	key := keyFor("s", "t")
 
-	b.Add(key, batchItem{msg: dummyMessage(1)})
-	if got := rec.next(t, 2*time.Second); len(got.items) != 1 {
-		t.Fatalf("first flush carried %d items; want 1", len(got.items))
+	q.AddSingle(key, batchItem{msg: dummyMessage(1)}, batchReply{})
+	if got := rec.next(t, 2*time.Second); totalMsgs(got.units) != 1 {
+		t.Fatalf("first flush carried %d messages; want 1", totalMsgs(got.units))
 	}
-
-	b.Add(key, batchItem{msg: dummyMessage(2)})
+	q.AddSingle(key, batchItem{msg: dummyMessage(2)}, batchReply{})
 	got := rec.next(t, 2*time.Second)
-	if len(got.items) != 1 || got.items[0].msg.MessageId != 2 {
-		t.Fatalf("second flush = %+v; want the single second message", got.items)
+	if totalMsgs(got.units) != 1 || got.units[0].msgs[0].MessageId != 2 {
+		t.Fatalf("second flush = %+v; want the single second message", got.units)
 	}
 }
 
-// TestBatcherIsolatesConversations is the privacy-critical test: interleaved
-// messages from different senders/targets must never share a flush.
-func TestBatcherIsolatesConversations(t *testing.T) {
+// TestQueueIsolatesConversations is the privacy-critical test.
+func TestQueueIsolatesConversations(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(50*time.Millisecond, time.Second, 10, rec)
-	defer b.Shutdown(time.Second)
+	q := testBatcher(50*time.Millisecond, 20*time.Millisecond, rec)
+	defer q.Shutdown(time.Second)
 
-	aX := keyFor("A", "X")
-	bX := keyFor("B", "X") // same recipient, different sender
-	aY := keyFor("A", "Y") // same sender, different recipient
-
-	// Interleave so that a naive single queue would merge all three.
-	b.Add(aX, batchItem{msg: dummyMessage(1)})
-	b.Add(bX, batchItem{msg: dummyMessage(2)})
-	b.Add(aY, batchItem{msg: dummyMessage(3)})
-	b.Add(aX, batchItem{msg: dummyMessage(4)})
+	aX, bX, aY := keyFor("A", "X"), keyFor("B", "X"), keyFor("A", "Y")
+	q.AddSingle(aX, batchItem{msg: dummyMessage(1)}, batchReply{})
+	q.AddSingle(bX, batchItem{msg: dummyMessage(2)}, batchReply{})
+	q.AddSingle(aY, batchItem{msg: dummyMessage(3)}, batchReply{})
+	q.AddSingle(aX, batchItem{msg: dummyMessage(4)}, batchReply{})
 
 	seen := map[convKey][]int64{}
 	for i := 0; i < 3; i++ {
 		got := rec.next(t, 2*time.Second)
-		for _, it := range got.items {
-			seen[got.key] = append(seen[got.key], it.msg.MessageId)
+		for _, u := range got.units {
+			seen[got.key] = append(seen[got.key], u.msgs[0].MessageId)
 		}
 	}
-	want := map[convKey][]int64{
-		aX: {1, 4},
-		bX: {2},
-		aY: {3},
-	}
+	want := map[convKey][]int64{aX: {1, 4}, bX: {2}, aY: {3}}
 	if len(seen) != len(want) {
-		t.Fatalf("flush keys = %d; want %d (each conversation its own batch)", len(seen), len(want))
+		t.Fatalf("flush keys = %d; want %d (each conversation its own queue)", len(seen), len(want))
 	}
 	for k, ids := range want {
 		gotIDs := seen[k]
@@ -156,27 +144,80 @@ func TestBatcherIsolatesConversations(t *testing.T) {
 	}
 }
 
-// TestBatcherMaxItems: hitting the item cap flushes at once.
-func TestBatcherMaxItems(t *testing.T) {
+// TestQueueGroupsAlbum: the items of one media group become ONE unit (in order,
+// deduped), keeping their position relative to surrounding messages.
+func TestQueueGroupsAlbum(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(10*time.Second, 10*time.Second, 2, rec)
-	defer b.Shutdown(time.Second)
+	q := testBatcher(10*time.Second, 10*time.Second, rec)
 	key := keyFor("s", "t")
 
-	b.Add(key, batchItem{msg: dummyMessage(1)})
-	b.Add(key, batchItem{msg: dummyMessage(2)}) // cap of 2 -> immediate flush
-	got := rec.next(t, time.Second)
-	if len(got.items) != 2 {
-		t.Fatalf("cap flush carried %d items; want 2", len(got.items))
+	q.AddSingle(key, batchItem{msg: dummyMessage(1)}, batchReply{})
+	q.AddAlbumItem(key, "album-a", dummyMessage(50), "", batchReply{})
+	q.AddAlbumItem(key, "album-a", dummyMessage(52), "", batchReply{})
+	q.AddAlbumItem(key, "album-a", dummyMessage(51), "", batchReply{})
+	q.AddAlbumItem(key, "album-a", dummyMessage(52), "", batchReply{}) // redelivered duplicate
+	q.AddSingle(key, batchItem{msg: dummyMessage(2)}, batchReply{})
+	q.FlushKey(key)
+
+	got := rec.next(t, 2*time.Second)
+	if len(got.units) != 3 {
+		t.Fatalf("units = %d (%+v); want single, album, single", len(got.units), got.units)
+	}
+	if got.units[0].kind != unitSingle || got.units[0].msgs[0].MessageId != 1 {
+		t.Errorf("unit 0 = %+v; want the first single", got.units[0])
+	}
+	album := got.units[1]
+	if album.kind != unitAlbum || len(album.msgs) != 3 {
+		t.Fatalf("album unit = %+v; want 3 deduped items", album)
+	}
+	if got.units[2].kind != unitSingle || got.units[2].msgs[0].MessageId != 2 {
+		t.Errorf("unit 2 = %+v; want the trailing single", got.units[2])
 	}
 }
 
-// TestBatcherMaxWait: a sender who keeps typing must still be delivered once the
-// absolute cap passes, even though every message resets the debounce window.
-func TestBatcherMaxWait(t *testing.T) {
+// TestQueueRetainsReplyContext: a batched reply must keep the message it replies to.
+func TestQueueRetainsReplyContext(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(80*time.Millisecond, 160*time.Millisecond, 100, rec)
-	defer b.Shutdown(time.Second)
+	q := testBatcher(10*time.Second, 10*time.Second, rec)
+	key := keyFor("s", "t")
+
+	q.AddSingle(key, batchItem{msg: dummyMessage(5), targetCid: "cid-1"}, batchReply{
+		targetMid: "9001", quoteText: "quoted", quotePos: 4,
+	})
+	q.FlushKey(key)
+	got := rec.next(t, 2*time.Second)
+	if len(got.units) != 1 {
+		t.Fatalf("units = %d; want 1", len(got.units))
+	}
+	r := got.units[0].reply
+	if r.targetMid != "9001" || r.quoteText != "quoted" || r.quotePos != 4 {
+		t.Fatalf("reply context = %+v; want it preserved", r)
+	}
+	if got.units[0].targetCid != "cid-1" {
+		t.Errorf("targetCid = %q; want cid-1", got.units[0].targetCid)
+	}
+}
+
+// TestQueueMaxItems: hitting the message cap flushes at once (album items count too).
+func TestQueueMaxItems(t *testing.T) {
+	rec := newRecorder()
+	q := newBatcher(10*time.Second, 10*time.Second, 10*time.Second, 2, rec.flush)
+	defer q.Shutdown(time.Second)
+	key := keyFor("s", "t")
+	q.AddSingle(key, batchItem{msg: dummyMessage(1)}, batchReply{})
+	q.AddSingle(key, batchItem{msg: dummyMessage(2)}, batchReply{}) // cap of 2 -> flush
+	got := rec.next(t, time.Second)
+	if totalMsgs(got.units) != 2 {
+		t.Fatalf("cap flush carried %d messages; want 2", totalMsgs(got.units))
+	}
+}
+
+// TestQueueMaxWait: a sender who keeps typing is still delivered once the absolute
+// cap passes.
+func TestQueueMaxWait(t *testing.T) {
+	rec := newRecorder()
+	q := newBatcher(80*time.Millisecond, 80*time.Millisecond, 160*time.Millisecond, 100, rec.flush)
+	defer q.Shutdown(time.Second)
 	key := keyFor("s", "t")
 
 	start := time.Now()
@@ -184,127 +225,109 @@ func TestBatcherMaxWait(t *testing.T) {
 	go func() {
 		defer close(addDone)
 		for i := 1; i <= 6; i++ {
-			b.Add(key, batchItem{msg: dummyMessage(int64(i))})
-			time.Sleep(40 * time.Millisecond) // reset the 80ms window every time
+			q.AddSingle(key, batchItem{msg: dummyMessage(int64(i))}, batchReply{})
+			time.Sleep(40 * time.Millisecond)
 		}
 	}()
-	var got flushRecord
-	select {
-	case got = <-rec.ch:
-	case <-time.After(2 * time.Second):
-		t.Fatal("no flush within 2s despite the max-wait cap")
+	got := rec.next(t, 2*time.Second)
+	if elapsed := time.Since(start); elapsed > 160*time.Millisecond+300*time.Millisecond {
+		t.Fatalf("flush took %s; must not exceed max-wait 160ms (plus slack)", elapsed)
 	}
-	elapsed := time.Since(start)
-	if elapsed > b.maxWait+300*time.Millisecond {
-		t.Fatalf("flush took %s; must not exceed max-wait %s (plus slack)", elapsed, b.maxWait)
-	}
-	if len(got.items) == 0 {
-		t.Fatal("flush carried no items")
+	if totalMsgs(got.units) == 0 {
+		t.Fatal("flush carried no messages")
 	}
 	<-addDone
 }
 
-// TestBatcherFlushKeyIsSynchronousAndOrdered: an immediate send (answer/album)
-// flushes the conversation's buffered burst first, and later messages start a new
-// batch.
-func TestBatcherFlushKeyIsSynchronous(t *testing.T) {
+// TestQueueFlushKeyIsSynchronous: an immediate send flushes the queue first and a
+// later item starts a new one.
+func TestQueueFlushKeyIsSynchronous(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(10*time.Second, 10*time.Second, 10, rec)
-	defer b.Shutdown(time.Second)
+	q := testBatcher(10*time.Second, 10*time.Second, rec)
+	defer q.Shutdown(time.Second)
 	key := keyFor("s", "t")
 
-	b.Add(key, batchItem{msg: dummyMessage(1)})
-	b.Add(key, batchItem{msg: dummyMessage(2)})
-	b.FlushKey(key) // must have flushed by the time it returns
+	q.AddSingle(key, batchItem{msg: dummyMessage(1)}, batchReply{})
+	q.AddSingle(key, batchItem{msg: dummyMessage(2)}, batchReply{})
+	q.FlushKey(key)
 	select {
 	case got := <-rec.ch:
-		if len(got.items) != 2 {
-			t.Fatalf("FlushKey flushed %d items; want 2", len(got.items))
+		if totalMsgs(got.units) != 2 {
+			t.Fatalf("FlushKey flushed %d messages; want 2", totalMsgs(got.units))
 		}
 	default:
 		t.Fatal("FlushKey returned without flushing")
 	}
 
-	b.Add(key, batchItem{msg: dummyMessage(3)})
-	rec.expectNoFlush(t, 40*time.Millisecond) // window is 10s: it must still be buffered
-	b.FlushKey(key)
-	select {
-	case got := <-rec.ch:
-		if len(got.items) != 1 || got.items[0].msg.MessageId != 3 {
-			t.Fatalf("post-flush batch = %v; want the single new message", got.items)
-		}
-	default:
-		t.Fatal("second FlushKey did not flush the new batch")
+	q.AddSingle(key, batchItem{msg: dummyMessage(3)}, batchReply{})
+	rec.expectNoFlush(t, 40*time.Millisecond)
+	q.FlushKey(key)
+	if got := <-rec.ch; totalMsgs(got.units) != 1 || got.units[0].msgs[0].MessageId != 3 {
+		t.Fatalf("post-flush queue = %+v; want the single new message", got.units)
 	}
 }
 
-// TestBatcherShutdownFlushes: a batch pending at shutdown is delivered, not lost.
-func TestBatcherShutdownFlushes(t *testing.T) {
+// TestQueueShutdownFlushes: a queue pending at shutdown is delivered, not lost.
+func TestQueueShutdownFlushes(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(10*time.Second, 10*time.Second, 10, rec)
+	q := testBatcher(10*time.Second, 10*time.Second, rec)
 	key := keyFor("s", "t")
-	b.Add(key, batchItem{msg: dummyMessage(1)})
-	b.Add(key, batchItem{msg: dummyMessage(2)})
-	b.Shutdown(2 * time.Second)
+	q.AddSingle(key, batchItem{msg: dummyMessage(1)}, batchReply{})
+	q.AddSingle(key, batchItem{msg: dummyMessage(2)}, batchReply{})
+	q.Shutdown(2 * time.Second)
 	got := rec.next(t, time.Second)
-	if len(got.items) != 2 {
-		t.Fatalf("shutdown flush carried %d items; want 2", len(got.items))
+	if totalMsgs(got.units) != 2 {
+		t.Fatalf("shutdown flush carried %d messages; want 2", totalMsgs(got.units))
 	}
 }
 
-// TestBatcherDisabledFlushesImmediately: window=0 is the documented escape hatch
-// (BATCH_WINDOW_MS=0) and must preserve the old immediate behaviour.
-func TestBatcherDisabledFlushesImmediately(t *testing.T) {
+// TestQueueDisabledWindowsFlushImmediately: BATCH_WINDOW_MS=0 / ALBUM_WINDOW_MS=0
+// are the documented escape hatches and must preserve immediate delivery.
+func TestQueueDisabledWindowsFlushImmediately(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(0, 0, 10, rec)
-	if b.Enabled() {
-		t.Fatal("window 0 must disable buffering")
+	q := newBatcher(0, 0, time.Second, 10, rec.flush)
+	q.AddSingle(keyFor("s", "t"), batchItem{msg: dummyMessage(1)}, batchReply{})
+	if got := rec.next(t, time.Second); totalMsgs(got.units) != 1 {
+		t.Fatalf("disabled singles flushed %d; want 1", totalMsgs(got.units))
 	}
-	b.Add(keyFor("s", "t"), batchItem{msg: dummyMessage(1)})
-	got := rec.next(t, time.Second)
-	if len(got.items) != 1 {
-		t.Fatalf("disabled batcher flushed %d items; want 1", len(got.items))
+	q.AddAlbumItem(keyFor("s", "t"), "a", dummyMessage(2), "", batchReply{})
+	if got := rec.next(t, time.Second); len(got.units) != 1 {
+		t.Fatalf("disabled albums flushed %d units; want 1", len(got.units))
 	}
 }
 
-// TestBatcherSweepCatchesLostTimers documents the insurance path: a batch whose
-// timer never fires is still flushed by the periodic sweep once it is old enough.
-func TestBatcherSweepCatchesLostTimers(t *testing.T) {
+// TestQueueSweepCatchesLostTimers: a queue whose timer never fires is still flushed.
+func TestQueueSweepCatchesLostTimers(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(10*time.Millisecond, 20*time.Millisecond, 10, rec)
-	// Replace the timer with one that never fires, simulating a lost timer.
-	b.after = func(time.Duration, func()) *time.Timer {
-		return time.NewTimer(time.Hour) // stopped by detachLocked; never invokes fn
-	}
-	defer b.Shutdown(time.Second)
+	q := testBatcher(10*time.Millisecond, 10*time.Millisecond, rec)
+	q.after = func(time.Duration, func()) *time.Timer { return time.NewTimer(time.Hour) }
+	defer q.Shutdown(time.Second)
 	key := keyFor("s", "t")
-	b.Add(key, batchItem{msg: dummyMessage(1)})
-	b.Add(key, batchItem{msg: dummyMessage(2)})
+	q.AddSingle(key, batchItem{msg: dummyMessage(1)}, batchReply{})
+	q.AddSingle(key, batchItem{msg: dummyMessage(2)}, batchReply{})
 
-	time.Sleep(b.maxWait + b.window + 50*time.Millisecond)
-	b.Sweep()
+	time.Sleep(q.maxWait + q.window + q.albumWnd + 50*time.Millisecond)
+	q.Sweep()
 	got := rec.next(t, time.Second)
-	if len(got.items) != 2 {
-		t.Fatalf("sweep flush carried %d items; want 2", len(got.items))
+	if totalMsgs(got.units) != 2 {
+		t.Fatalf("sweep flush carried %d; want 2", totalMsgs(got.units))
 	}
 }
 
-// TestBatcherNoCrossConversationAfterDetach uses many conversations concurrently
-// under -race: whatever the scheduling, every flushed item must belong to the
-// key it was flushed under (nothing is read from shared mutable state).
-func TestBatcherNoCrossConversationAfterDetach(t *testing.T) {
+// TestQueueNoCrossConversationAfterDetach uses many conversations concurrently under
+// -race: every flushed unit must belong to the key it was flushed under.
+func TestQueueNoCrossConversationAfterDetach(t *testing.T) {
 	rec := newRecorder()
-	b := testBatcher(15*time.Millisecond, 200*time.Millisecond, 10, rec)
-	defer b.Shutdown(2 * time.Second)
+	q := testBatcher(15*time.Millisecond, 15*time.Millisecond, rec)
+	defer q.Shutdown(2 * time.Second)
 
 	const conversations = 20
-	perConv := map[convKey][]int64{}
 	var mu sync.Mutex
+	seen := make(map[convKey]bool)
 	for i := 0; i < conversations; i++ {
 		key := keyFor(fmt.Sprintf("s%d", i), fmt.Sprintf("t%d", i))
-		perConv[key] = nil
-		b.Add(key, batchItem{msg: dummyMessage(int64(i * 10))})
-		b.Add(key, batchItem{msg: dummyMessage(int64(i*10 + 1))})
+		q.AddSingle(key, batchItem{msg: dummyMessage(int64(i * 10))}, batchReply{})
+		q.AddSingle(key, batchItem{msg: dummyMessage(int64(i*10 + 1))}, batchReply{})
 	}
 
 	deadline := time.After(3 * time.Second)
@@ -314,20 +337,24 @@ func TestBatcherNoCrossConversationAfterDetach(t *testing.T) {
 		case got := <-rec.ch:
 			batches++
 			mu.Lock()
-			// Every item flushed under a key must be one of that key's own messages:
-			// the id encodes the conversation index (i*10 / i*10+1).
 			owner := 0
 			fmt.Sscanf(got.key.senderUID, "s%d", &owner)
-			for _, it := range got.items {
-				id := it.msg.MessageId
-				if int(id) != owner*10 && int(id) != owner*10+1 {
-					mu.Unlock()
-					t.Fatalf("conversation %+v received foreign message id %d", got.key, id)
+			for _, u := range got.units {
+				for _, m := range u.msgs {
+					id := int(m.MessageId)
+					if id != owner*10 && id != owner*10+1 {
+						mu.Unlock()
+						t.Fatalf("conversation %+v received foreign message id %d", got.key, id)
+					}
 				}
 			}
+			seen[got.key] = true
 			mu.Unlock()
 		case <-deadline:
 			t.Fatalf("only %d/%d batches flushed", batches, conversations)
 		}
+	}
+	if len(seen) != conversations {
+		t.Fatalf("distinct conversations flushed = %d; want %d", len(seen), conversations)
 	}
 }

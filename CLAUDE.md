@@ -21,6 +21,9 @@ go build ./...
 go vet ./...
 gofmt -l .            # must print nothing; `gofmt -w .` to fix
 go test ./...                    # encoder golden vectors + rest; DB tests skip without DB_HOST
+# The destructive internal/db integration tests require a database whose name ends in
+# _test (they DROP tables); they skip otherwise, so pointing them at the deployment
+# .env can never wipe real data. Use e.g. DB_NAME=chevalet_test.
 go test -race -count=1 ./...     # what CI actually runs — run this before every PR
 go test ./internal/encoder/...   # single package
 go test ./internal/bot/ -run TestSendMsg   # single test

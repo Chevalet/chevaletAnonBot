@@ -270,6 +270,10 @@ func newHarness(t *testing.T) *harness {
 		limiter:    limiter,
 	}
 	lc.onRetryable = b.enqueueFailedSend
+	// The conversation delivery queue is always present (as in production); its
+	// windows are zero by default so existing tests keep the immediate-delivery
+	// behaviour. Tests that exercise batching/albums widen them explicitly.
+	b.batcher = newBatcher(cfg.BatchWindow, cfg.AlbumWindow, 2500*time.Millisecond, 10, b.deliverUnits)
 	b.Dispatcher = ext.NewDispatcher(&ext.DispatcherOpts{
 		Error:       b.onError,
 		Panic:       b.onPanic,
@@ -571,6 +575,7 @@ func TestAnchorCancelButtonStillCancels(t *testing.T) {
 // is where a stray extra send would show up.
 func TestAnchorAlbumIsDeliveredOnce(t *testing.T) {
 	h := newHarness(t)
+	h.enableQueue(0, 40*time.Millisecond, 2*time.Second, 10) // singles immediate, album buffered
 	sender, target := newUID(), newUID()
 	h.send(target, "/start", nil)
 	cid := h.linkOf(target)
@@ -582,11 +587,18 @@ func TestAnchorAlbumIsDeliveredOnce(t *testing.T) {
 	h.sendPhoto(sender, "GRP1", prompt)
 	h.sendPhoto(sender, "GRP1", prompt)
 
-	// The first item is stashed; each later one re-copies the whole group after
-	// deleting the previous copy, so the LAST copyMessages call is the album.
+	// The queue waits for the whole gallery, then copies it in ONE CopyMessages call.
 	want := strconv.FormatInt(target, 10)
-	var lastCount int
-	var copyCalls, singleCopies int
+	h.waitFor(3*time.Second, "the gallery copy", func() bool {
+		for _, c := range h.tg.since(mark) {
+			if c.method == "copyMessages" && c.params["chat_id"] == want {
+				return true
+			}
+		}
+		return false
+	})
+	time.Sleep(100 * time.Millisecond) // let any (buggy) extra call land
+	var copyCalls, singleCopies, deletes, lastCount int
 	for _, c := range h.tg.since(mark) {
 		if c.params["chat_id"] != want {
 			continue
@@ -599,16 +611,20 @@ func TestAnchorAlbumIsDeliveredOnce(t *testing.T) {
 			lastCount = len(ids)
 		case "copyMessage":
 			singleCopies++
+		case "deleteMessages":
+			deletes++
 		}
 	}
-	if copyCalls == 0 {
-		t.Fatalf("the album was never delivered through the anchor")
+	if copyCalls != 1 {
+		t.Fatalf("album copyMessages calls = %d; want exactly 1 (no delete/re-copy loop)", copyCalls)
 	}
 	if lastCount != 3 {
 		t.Errorf("the delivered album holds %d items; want 3", lastCount)
 	}
-	// The first item must not ALSO arrive as its own standalone message.
 	if singleCopies != 0 {
 		t.Errorf("the album also produced %d single-message copies; an item was delivered twice", singleCopies)
+	}
+	if deletes != 0 {
+		t.Errorf("the album produced %d deleteMessages calls; the delete/re-copy loop must be gone", deletes)
 	}
 }

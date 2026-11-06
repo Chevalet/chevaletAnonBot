@@ -296,10 +296,15 @@ func (b *Bot) deliverBoxDelivery(tg *gotgbot.Bot, recipientID int64, d boxDelive
 			return true, false, nil
 		}
 		// Album copies cannot carry reply markup; send the carrier message the
-		// immediate media path also uses, replying to the first copied item.
+		// immediate media path also uses. If the stored album was an answer, the
+		// carrier replies to the message that was answered instead of to the gallery.
+		replyParams := &gotgbot.ReplyParameters{MessageId: copied[0].MessageId, ChatId: recipientID}
+		if rp := boxReplyParams(first); rp != nil {
+			replyParams = rp
+		}
 		if _, serr := tg.SendMessage(recipientID, txtMediaUseThis, &gotgbot.SendMessageOpts{
 			ParseMode:       "HTML",
-			ReplyParameters: &gotgbot.ReplyParameters{MessageId: copied[0].MessageId, ChatId: recipientID},
+			ReplyParameters: replyParams,
 			ReplyMarkup:     kb,
 		}); serr != nil {
 			return true, false, nil // the album itself is delivered; the carrier is a nice-to-have

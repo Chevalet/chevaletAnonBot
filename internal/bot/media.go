@@ -11,11 +11,39 @@ import (
 	"github.com/aturzone/chevaletAnonBot/internal/config"
 )
 
-// handleMedia ports start.handle_media: the top-level handler for media-group
-// messages. The first media of a group is handled by send_msg/send_msg_template
-// (which stashes the group state); each subsequent media of the same group lands
-// here, where the whole group is re-copied to the target and re-tagged.
+// handleMedia is the top-level handler for media-group messages. The FIRST item of
+// a gallery is buffered by send_msg (which records the conversation for the group);
+// each subsequent item of the same group lands here and is appended to the same
+// album unit in the conversation's delivery queue. The queue sends the COMPLETE
+// gallery in one CopyMessages call after the debounce window — there is no
+// delete-and-re-copy loop anymore.
 func handleMedia(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
+	msg := ctx.EffectiveMessage
+	ud := b.ud(ctx)
+
+	if msg.MediaGroupId != "" && ud.d.groupMsgs != nil &&
+		msg.MediaGroupId == ud.d.mediaGroupID && ud.d.groupTargetUID != "" && !ud.d.groupImmediate {
+		key := convKey{senderUID: userid, targetUID: ud.d.groupTargetUID}
+		reply := batchReply{
+			targetMid: ud.d.groupReplyTo,
+			quoteText: ud.d.groupQuoteText,
+			quotePos:  ud.d.groupQuotePos,
+		}
+		b.batcher.AddAlbumItem(key, msg.MediaGroupId, msg, ud.d.groupTargetCid, reply)
+		ud.d.groupExpiration = nowSeconds() + config.ExpireAfter
+		return nil
+	}
+
+	// Not part of a buffered gallery: the legacy path handles channel/external-reply
+	// albums, a late item whose queue was already flushed, or an unrelated media
+	// message.
+	return b.handleMediaLegacy(tg, ctx, userid)
+}
+
+// handleMediaLegacy is the original immediate album path, kept only for the rare
+// external/channel-reply gallery. It accumulates the group and re-copies it on each
+// arrival (the old behaviour); ordinary galleries never reach it.
+func (b *Bot) handleMediaLegacy(tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
 	msg := ctx.EffectiveMessage
 	ud := b.ud(ctx)
 
@@ -58,22 +86,6 @@ func handleMedia(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error
 
 	// add this media to the group
 	ud.d.groupMsgs = append(ud.d.groupMsgs, msg)
-
-	// Message Box mode: the recipient asked not to receive messages immediately, so
-	// every album item is persisted as a delivery reference (grouped by
-	// media_group_id) instead of being copied. The whole gallery is reassembled when
-	// the recipient opens the box.
-	if ud.d.groupBoxOn {
-		dbctx, cancel := b.bg()
-		defer cancel()
-		if err := b.storeBoxIncoming(dbctx, ud.d.groupTargetUID, userid, []boxIncoming{
-			{msg: msg, targetCid: ud.d.groupBoxTargetCid},
-		}); err != nil {
-			return err
-		}
-		ud.d.groupExpiration = nowSeconds() + config.ExpireAfter
-		return nil
-	}
 
 	targetUID := ud.d.groupTargetUID
 

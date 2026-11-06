@@ -103,6 +103,12 @@ type Config struct {
 	// the added latency and the size of the sender-side "sent" confirmation.
 	BatchMaxMessages int
 
+	// AlbumWindow is how long the queue waits after the last item of a media group
+	// before sending the whole gallery in one CopyMessages. Telegram delivers album
+	// items as back-to-back updates within roughly a second, so this window (0.6 s
+	// default) collects the complete group without making the recipient wait.
+	AlbumWindow time.Duration
+
 	// ContinueWindow is how long after a delivered message a PLAIN follow-up from
 	// the same sender keeps going to the same recipient without re-opening the
 	// link. The bot's conversation state ends once a message is sent (the Python
@@ -307,6 +313,18 @@ func Load() (*Config, error) {
 	// extension; clamp rather than failing the boot.
 	if c.BatchWindow > 0 && c.BatchMaxWait < c.BatchWindow {
 		c.BatchMaxWait = c.BatchWindow
+	}
+
+	// ALBUM_WINDOW_MS: how long to wait for the remaining items of a gallery
+	// (media group) before copying it in one go.
+	c.AlbumWindow = 600 * time.Millisecond
+	if v := opt("ALBUM_WINDOW_MS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			errs = append(errs, fmt.Sprintf("ALBUM_WINDOW_MS must be a non-negative integer (got %q)", v))
+		} else {
+			c.AlbumWindow = time.Duration(n) * time.Millisecond
+		}
 	}
 
 	// CONTINUE_WINDOW_MS: how long a plain follow-up message after a send keeps

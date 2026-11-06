@@ -155,12 +155,17 @@ type convData struct {
 	groupNotifyMsg       *gotgbot.Message              // "group_notify_msg"
 	groupReplyMarkup     *gotgbot.InlineKeyboardMarkup // "group_reply_markup"
 	groupWarningMsgID    string                        // "group_warning_msg_id"
-	// groupBoxOn marks an album whose recipient has the Message Box enabled: the
-	// album's first item was stored by send_msg and the remaining items must be
-	// stored (not copied) by handle_media. groupBoxTargetCid keeps the link id the
-	// album arrived through for the stored rows.
-	groupBoxOn        bool
-	groupBoxTargetCid string
+	// groupTargetCid is the link id the album arrived through (for the keyboard's
+	// "sent with link N" row). groupReply* carry a normal answer context through the
+	// album's items so the delivered gallery's carrier replies to the right message.
+	groupTargetCid string
+	groupReplyTo   string
+	groupQuoteText string
+	groupQuotePos  int64
+	// groupImmediate marks the legacy (external/channel reply) album path, which is
+	// copied on arrival rather than buffered; handle_media must then use the legacy
+	// implementation.
+	groupImmediate bool
 
 	// "sent_medias": message ids already copied to the target for this group.
 	sentMedias []string
