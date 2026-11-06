@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -106,8 +107,8 @@ func (b *Bot) drainOutbox(ctx context.Context) {
 		return
 	}
 	for _, it := range items {
-		var params map[string]any
-		if err := json.Unmarshal(it.Params, &params); err != nil {
+		params, err := decodeOutboxParams(it.Params)
+		if err != nil {
 			// Unparseable: it can never be sent, so stop holding it.
 			slog.Warn("outbox: dropping an unreadable item", "id", it.ID, "err", err)
 			_ = b.DB.DeleteSend(dbctx, it.ID)
@@ -134,6 +135,25 @@ func (b *Bot) drainOutbox(ctx context.Context) {
 		}
 		slog.Info("outbox: delivered a queued message", "method", it.Method, "attempts", it.Attempts)
 	}
+}
+
+// decodeOutboxParams reconstructs the stored request params for a retry.
+//
+// Decode with UseNumber. The stored JSON was produced from gotgbot's typed params
+// map, so every numeric field (chat_id, message_id, …) is a JSON NUMBER. Decoding
+// into map[string]any without UseNumber turns those into float64, and gotgbot
+// renders a float64 with fmt.Sprint — chat 1234567890 became "1.23456789e+09",
+// Telegram answered "chat not found", and the retry (the whole point of this
+// queue) never delivered anything. json.Number keeps the original digits for
+// scalars AND for arrays like message_ids, which gotgbot re-marshals verbatim.
+func decodeOutboxParams(raw []byte) (map[string]any, error) {
+	var params map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&params); err != nil {
+		return nil, err
+	}
+	return params, nil
 }
 
 // retryableSendFailure reports whether a failed send is worth queueing.
