@@ -364,3 +364,21 @@ func (db *DB) ApplyNameSync(ctx context.Context, uid string) (string, error) {
 	}
 	return name, nil
 }
+
+// --- message box -------------------------------------------------------------
+//
+// message_box is the per-user opt-in for the "message box" feature: OFF BY
+// DEFAULT, so a missing/false row keeps the normal immediate-delivery behaviour
+// (see MakeTables). The queue itself lives in internal/db/messagebox.go; these
+// two methods are just the user setting, mirroring GetSeenStatus/SetSeenOption.
+
+// GetMessageBox reports whether uid has the message box enabled.
+func (db *DB) GetMessageBox(ctx context.Context, uid string) (bool, error) {
+	return db.queryBool(ctx, `SELECT message_box FROM users WHERE uid=$1`, uid)
+}
+
+// SetMessageBox turns the message box on or off for uid.
+func (db *DB) SetMessageBox(ctx context.Context, uid string, on bool) error {
+	_, err := db.pool.Exec(ctx, `UPDATE users SET message_box=$1 WHERE uid=$2`, on, uid)
+	return err
+}

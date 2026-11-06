@@ -53,19 +53,49 @@ type apiCall struct {
 	params map[string]string
 }
 
+// fakeFailure is a scripted Bot API error: the next call to a method returns it.
+type fakeFailure struct {
+	status      int
+	description string
+}
+
 // fakeTG answers the Bot API plausibly and records every call.
 type fakeTG struct {
 	mu     sync.Mutex
 	calls  []apiCall
 	nextID atomic.Int64
 	srv    *httptest.Server
+
+	failMu   sync.Mutex
+	failures map[string][]fakeFailure
 }
 
 func newFakeTG() *fakeTG {
-	f := &fakeTG{}
+	f := &fakeTG{failures: make(map[string][]fakeFailure)}
 	f.nextID.Store(1000)
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
+}
+
+// failNext scripts the next n calls of method to fail with the given error.
+func (f *fakeTG) failNext(method string, n, status int, description string) {
+	f.failMu.Lock()
+	defer f.failMu.Unlock()
+	for i := 0; i < n; i++ {
+		f.failures[method] = append(f.failures[method], fakeFailure{status: status, description: description})
+	}
+}
+
+// takeFailure consumes one scripted failure for method, if any.
+func (f *fakeTG) takeFailure(method string) (fakeFailure, bool) {
+	f.failMu.Lock()
+	defer f.failMu.Unlock()
+	q := f.failures[method]
+	if len(q) == 0 {
+		return fakeFailure{}, false
+	}
+	f.failures[method] = q[1:]
+	return q[0], true
 }
 
 func (f *fakeTG) handle(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +112,18 @@ func (f *fakeTG) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.calls = append(f.calls, apiCall{method: method, params: params})
 	f.mu.Unlock()
+
+	if fail, ok := f.takeFailure(method); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(fail.status)
+		b, _ := json.Marshal(map[string]any{
+			"ok":          false,
+			"error_code":  fail.status,
+			"description": fail.description,
+		})
+		_, _ = w.Write(b)
+		return
+	}
 
 	id := f.nextID.Add(1)
 	write := func(v any) {

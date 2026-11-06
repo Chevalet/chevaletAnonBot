@@ -39,6 +39,13 @@ func (b *Bot) startBackground(ctx context.Context) {
 	// Drains the durable send outbox: sends that failed for a retryable reason are
 	// re-attempted here instead of being lost. See outbox.go.
 	b.goBG(func() { b.outboxLoop(ctx) })
+	// Message-box housekeeping: return rows left claimed by a crashed open pass and
+	// flush batch buffers whose timer was somehow lost (insurance — the timer is the
+	// primary path). Also emits the startup sweep once, before polling traffic.
+	b.goBG(func() {
+		b.resetStaleBoxClaims()
+		b.batcherSweepLoop(ctx)
+	})
 	if b.Cfg.SendGMGN {
 		b.goBG(func() { b.gmgnLoop(ctx, b.Cfg.GMTime, true) })  // morning
 		b.goBG(func() { b.gmgnLoop(ctx, b.Cfg.GNTime, false) }) // night
@@ -71,6 +78,7 @@ func botCommands() []gotgbot.BotCommand {
 		{Command: "start", Description: "▶️ شروع"},
 		{Command: "my_links", Description: "🔗 لینک‌های ناشناس من"},
 		{Command: "settings", Description: "⚙️ تنظیمات و قابلیت‌ها"},
+		{Command: "message_box", Description: "📬 جعبه پیام‌ها"},
 		{Command: "help", Description: "🆘 راهنما"},
 		{Command: "privacy", Description: "🔒 امنیت و حریم خصوصی"},
 		{Command: "donate", Description: "🙏 حمایت مالی"},

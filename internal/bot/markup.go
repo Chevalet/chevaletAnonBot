@@ -147,6 +147,10 @@ func settingsMainMenu() [][]gotgbot.InlineKeyboardButton {
 		{cb("✍️ ارسال به ادمین خاص کانال", "channel-signature|")},
 		{cb("🔗 پیشنمایشِ لینک", "wpp|"), cb("👌 ارسال پیامهای پیوسته", "media-settings|")},
 		{cb("🖋 ریپلای به بخشی از پیام", "reply-quote|"), cb("👀 نمایش دکمه سین زدن", "seen-settings|")},
+		// Message box: its own row right under the seen option it is closest to —
+		// both change what the recipient does with a delivered message. Sharing a
+		// row with a long label would truncate it on a narrow screen.
+		{cb("📬 جعبه پیام‌ها", mboxSettingsPrefix)},
 		{cb("⚠️ اخطار پاک سازی پیام", "warning|"), cb("📛 تغییر نام نمایشی", "change-name|")},
 		// Its own row, directly under the rename button it belongs with: the label
 		// is long enough that sharing a row truncates it on a narrow screen.

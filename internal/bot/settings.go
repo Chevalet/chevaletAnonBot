@@ -726,3 +726,24 @@ func (b *Bot) deleteOgMID(tg *gotgbot.Bot, ctx *ext.Context, _ string) {
 
 // runeLen counts code points, matching Python's len(str).
 func runeLen(s string) int { return utf8.RuneCountInString(s) }
+
+// messageBoxSettings drives the "📬 جعبه پیام‌ها" page: it renders the current
+// state, and "<prefix>activate" / "<prefix>deactivate" flip it, exactly like
+// seenSettings/warningClbk. When it is ON, incoming anonymous messages are held
+// in the user's box instead of being delivered immediately (the delivery logic
+// lives in messagebox_core.go, which also claims the box's contents when it is
+// opened). The DB default is OFF, so the page always renders the real value and
+// an existing user sees no behaviour change until they opt in.
+func messageBoxSettings(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
+	return b.settingsToggle(tg, ctx, userid, toggleSpec{
+		textKey:       "settings/message_box",
+		get:           b.DB.GetMessageBox,
+		set:           b.DB.SetMessageBox,
+		trueWord:      txtStateActive,
+		falseWord:     txtStateInactive,
+		activateBtn:   mboxActivateBtn,
+		deactivateBtn: mboxDeactivateBtn,
+		ansActivate:   txtBoxAnswerActivate,
+		ansDeactivate: txtBoxAnswerDeactivate,
+	})
+}

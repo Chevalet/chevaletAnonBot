@@ -54,6 +54,18 @@ type Bot struct {
 	// ratelimit.go for why this lives at the BotClient layer.
 	limiter *sendLimiter
 
+	// batcher buffers ordinary outbound sends for a short debounce window so a
+	// burst of messages from one sender reaches one recipient as a single delivery
+	// pass. See batcher.go. nil is impossible after New; the field exists here so
+	// Run can drain it on shutdown and tests can drive it directly.
+	batcher *batcher
+
+	// boxNotify* throttle the "you have new messages" ping of the Message Box mode
+	// (per recipient), so several senders do not produce several notifications.
+	// Guarded by boxNotifyMu; bounded by the number of users who enabled the box.
+	boxNotifyMu sync.Mutex
+	boxNotify   map[string]time.Time
+
 	// convStores holds the three ConversationHandlers' state storages so a stale
 	// flow can be dropped when the user starts a different one. Without this, a
 	// user part-way through composing a message who goes to settings and types a
@@ -164,7 +176,10 @@ func New(cfg *config.Config, database *db.DB, txt *texts.Loader) (*Bot, error) {
 		admins:     make(map[string]bool, len(cfg.Admins)),
 		errReports: newErrReportStore(50),
 		limiter:    limiter,
+		boxNotify:  make(map[string]time.Time),
 	}
+	// Wired after b exists: the flush path is a method on b.
+	b.batcher = newBatcher(cfg.BatchWindow, cfg.BatchMaxWait, cfg.BatchMaxMessages, b.deliverBatch)
 	for _, a := range cfg.Admins {
 		b.admins[a] = true
 	}
@@ -220,6 +235,12 @@ func (b *Bot) Run(ctx context.Context) error {
 	<-ctx.Done()
 	slog.Info("stopping updater")
 	err := b.Updater.Stop()
+	// Deliver whatever was buffered right before SIGTERM. Polling has stopped, so no
+	// new messages can be added; this runs before the DB pool is closed. Bounded by
+	// a deadline so a hung Telegram call cannot block shutdown forever.
+	if b.batcher != nil {
+		b.batcher.Shutdown(10 * time.Second)
+	}
 	// Drain tracked background work before main closes the DB pool, so nothing
 	// uses a closed pool (bounded — see waitBackground).
 	b.waitBackground(10 * time.Second)

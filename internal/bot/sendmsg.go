@@ -145,6 +145,68 @@ func (b *Bot) sendMsgCore(ctx *ext.Context, userid string) (string, error) {
 		return delNone, b.replyText(ctx, txtBlockedYou)
 	}
 
+	// ── batching / message-box routing ─────────────────────────────────────────
+	// Every per-message check above (session, link, answer-match, block) has passed,
+	// so the message is deliverable. What happens next depends on the recipient's
+	// Message Box setting and on whether this message can be grouped:
+	//
+	//   box ON            -> persist it (and the rest of its album) and ping the
+	//                        recipient instead of delivering now. The pending batch of
+	//                        this conversation is flushed first, so an older buffered
+	//                        message can never be stored after a newer immediate one.
+	//   box OFF, groupable -> buffer it for the debounce window (batcher.go).
+	//   otherwise          -> deliver immediately, as before; flush the buffered batch
+	//                        first to preserve order (answer, album or channel reply).
+	key := convKey{senderUID: userid, targetUID: targetUID}
+	groupable := targetMid == "" && !wasChannelReply && mediaGroupID == "" && externalReply == nil
+	boxOn := b.boxEnabled(dbctx, targetUID)
+
+	if boxOn {
+		b.flushPendingBatch(key)
+		in := boxIncoming{
+			msg:              msg,
+			targetCid:        targetCid,
+			quoteText:        quoteTextForBox(msg),
+			quotePosition:    quotePositionForBox(msg),
+			externalReply:    externalReply != nil,
+			channelReply:     wasChannelReply,
+			replyToChatID:    boxReplyChat(targetUID, targetMid, externalReply),
+			replyToMessageID: boxReplyMID(targetMid, externalReply),
+		}
+		if mediaGroupID != "" {
+			// The first item of an album: stash the album state exactly like the
+			// immediate path, but remember that this album belongs to the box, so the
+			// remaining items are stored by handleMedia instead of being copied.
+			ud.d.mediaGroupID = mediaGroupID
+			ud.d.groupMsgs = []*gotgbot.Message{msg}
+			ud.d.groupExpiration = nowSeconds() + config.ExpireAfter
+			ud.d.groupTargetUID = targetUID
+			ud.d.groupWasChannelReply = wasChannelReply
+			ud.d.groupBoxOn = true
+			ud.d.groupBoxTargetCid = targetCid
+		} else {
+			ud.clear()
+		}
+		if err := b.storeBoxIncoming(dbctx, targetUID, userid, []boxIncoming{in}); err != nil {
+			return "", err
+		}
+		// One confirmation per incoming message/album-item. The recipient-side
+		// notification is throttled separately (notifyNewBoxMessages).
+		if e := b.replyText(ctx, txtSentToTheirBox); e != nil {
+			return "", e
+		}
+		return delNone, nil
+	}
+
+	if groupable && b.batcher != nil && b.batcher.Enabled() {
+		ud.clear()
+		b.batcher.Add(key, batchItem{msg: msg, targetCid: targetCid})
+		return delNone, nil
+	}
+
+	// Immediate path: make sure nothing older is still buffered for this conversation.
+	b.flushPendingBatch(key)
+
 	// Seal the SENDER's uid into opaque, unlinkable tokens for the message's
 	// buttons — replaces the keyless EncodeChevaletID, which was reversible by any
 	// recipient once the source is public (S-0002). Two sends -> two nonces -> two

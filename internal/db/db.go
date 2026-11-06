@@ -224,6 +224,44 @@ func (db *DB) MakeTables(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS daily_metrics (
 			day DATE PRIMARY KEY,
 			messages BIGINT NOT NULL DEFAULT 0)`,
+
+		// message_box is the "message box" queue: when the recipient has it OFF
+		// (the default), delivered messages are also stored here so they can be
+		// replayed to the recipient as one batch later instead of arriving as a
+		// stream of interruptions.
+		//
+		// PRIVACY MODEL: this table stores delivery REFERENCES (source chat /
+		// message ids) plus the metadata needed to reproduce the send — never the
+		// message text and never its media content. The bot re-copies the original
+		// message from Telegram by id at flush time; the body never enters this DB.
+		// Rows are deleted once delivered (or capped away), so it is not a message
+		// archive.
+		`CREATE TABLE IF NOT EXISTS message_box (
+			id BIGSERIAL PRIMARY KEY,
+			recipient_uid VARCHAR(255) NOT NULL,
+			sender_uid VARCHAR(255) NOT NULL,
+			source_chat_id BIGINT NOT NULL,
+			source_message_id BIGINT NOT NULL,
+			media_group_id VARCHAR(64),
+			kind VARCHAR(32) NOT NULL,
+			target_cid VARCHAR(255),
+			reply_to_chat BIGINT NOT NULL DEFAULT 0,
+			reply_to_message BIGINT NOT NULL DEFAULT 0,
+			quote_text TEXT,
+			quote_position INTEGER NOT NULL DEFAULT 0,
+			external_reply BOOLEAN NOT NULL DEFAULT FALSE,
+			channel_reply BOOLEAN NOT NULL DEFAULT FALSE,
+			status VARCHAR(16) NOT NULL DEFAULT 'pending',
+			claim VARCHAR(64),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+
+		// The delivery worker claims pending rows for one recipient in insertion
+		// order (claim/backoff columns above), so the index matches that query.
+		`CREATE INDEX IF NOT EXISTS message_box_recipient_idx ON message_box (recipient_uid, status, id)`,
+
+		// The per-user opt-in. OFF BY DEFAULT (hard requirement): existing and new
+		// users keep the plain immediate-delivery behaviour until they turn it on.
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS message_box BOOLEAN NOT NULL DEFAULT FALSE`,
 	}
 	for _, s := range stmts {
 		if _, err := db.pool.Exec(ctx, s); err != nil {

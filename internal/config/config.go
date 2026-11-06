@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Hard-coded constants mirroring the tail of config.py.
@@ -85,6 +86,22 @@ type Config struct {
 	AIEnabled   bool // AI_ENABLED — the GM-group AI auto-reply is OFF unless "true"
 
 	DonationLink string
+
+	// BatchWindow groups a burst of ordinary (non-answer, non-album) anonymous
+	// messages from one sender to one recipient into a single delivery pass.
+	// It is a DEBOUNCE: every new message in the burst restarts it, so it must
+	// outlast the gap between messages a person deliberately sends back to back
+	// while staying shorter than the pause that means "the next one is separate".
+	// BATCH_WINDOW_MS=0 disables batching entirely (deliver at once, the
+	// pre-batching behaviour) — useful for debugging and tests.
+	BatchWindow time.Duration
+	// BatchMaxWait caps how long any one message may be held back, even while the
+	// sender keeps typing (the window restarts per message, so without an absolute
+	// cap a continuous stream would never be delivered).
+	BatchMaxWait time.Duration
+	// BatchMaxMessages caps the number of messages in one batch: it bounds both
+	// the added latency and the size of the sender-side "sent" confirmation.
+	BatchMaxMessages int
 
 	// TokenKeys are OPTIONAL extra secrets (TOKEN_KEYS, comma-separated) kept in
 	// the callback-token keyring for rotation: the current key is derived from
@@ -239,6 +256,48 @@ func Load() (*Config, error) {
 	}
 
 	c.DonationLink = req("DONATION_LINK")
+
+	// Message batching (see BatchWindow). The defaults are not arbitrary: long
+	// polling hands a message to the bot within a few hundred milliseconds of the
+	// sender pressing send, album items arrive as back-to-back updates (the
+	// media-group state machine already uses a 0.3 s window), and a person
+	// deliberately sending several messages as one thought leaves well under a
+	// second between them, while a pause that means "this next one is separate" is
+	// usually >1.2 s. 800 ms therefore groups the former and not the latter.
+	// BATCH_WINDOW_MS=0 turns batching off (deliver each message immediately, as
+	// before) — the escape hatch for debugging and tests.
+	c.BatchWindow = 800 * time.Millisecond
+	c.BatchMaxWait = 2500 * time.Millisecond
+	c.BatchMaxMessages = 10
+	if v := opt("BATCH_WINDOW_MS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			errs = append(errs, fmt.Sprintf("BATCH_WINDOW_MS must be a non-negative integer (got %q)", v))
+		} else {
+			c.BatchWindow = time.Duration(n) * time.Millisecond
+		}
+	}
+	if v := opt("BATCH_MAX_WAIT_MS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			errs = append(errs, fmt.Sprintf("BATCH_MAX_WAIT_MS must be a non-negative integer (got %q)", v))
+		} else {
+			c.BatchMaxWait = time.Duration(n) * time.Millisecond
+		}
+	}
+	if v := opt("BATCH_MAX_MESSAGES", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			errs = append(errs, fmt.Sprintf("BATCH_MAX_MESSAGES must be a positive integer (got %q)", v))
+		} else {
+			c.BatchMaxMessages = n
+		}
+	}
+	// A max-wait shorter than the window could never be reached before the first
+	// extension; clamp rather than failing the boot.
+	if c.BatchWindow > 0 && c.BatchMaxWait < c.BatchWindow {
+		c.BatchMaxWait = c.BatchWindow
+	}
 
 	// Optional callback-token rotation keyring (see TokenKeys). Trimmed, blanks
 	// dropped, so "a, ,b" -> ["a","b"].

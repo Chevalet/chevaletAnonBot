@@ -145,6 +145,12 @@ type convData struct {
 	groupNotifyMsg       *gotgbot.Message              // "group_notify_msg"
 	groupReplyMarkup     *gotgbot.InlineKeyboardMarkup // "group_reply_markup"
 	groupWarningMsgID    string                        // "group_warning_msg_id"
+	// groupBoxOn marks an album whose recipient has the Message Box enabled: the
+	// album's first item was stored by send_msg and the remaining items must be
+	// stored (not copied) by handle_media. groupBoxTargetCid keeps the link id the
+	// album arrived through for the stored rows.
+	groupBoxOn        bool
+	groupBoxTargetCid string
 
 	// "sent_medias": message ids already copied to the target for this group.
 	sentMedias []string

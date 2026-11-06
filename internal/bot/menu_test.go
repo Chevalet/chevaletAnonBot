@@ -58,6 +58,7 @@ var otherPrefixFilters = []string{
 	"errmore|", "rpt|", "am|", "no-callback", "delete|",
 	"reply-quote|", "media-settings|", "change-name|", "custom-tag|", "audio-tag|",
 	"wpp|", "warning|", "easier-answer|", "channel-signature|", "seen-settings|",
+	"mbox-settings|", "mbox|open",
 	"anon-name|", "name-sync|", "unblock-all|", "unblock-me|", "ch-link", "rm-link",
 	"answer|", "seen|", "report|", "block|", "unblock|", "cancel",
 	"oth|", "othx|",

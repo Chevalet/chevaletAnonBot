@@ -59,6 +59,22 @@ func handleMedia(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error
 	// add this media to the group
 	ud.d.groupMsgs = append(ud.d.groupMsgs, msg)
 
+	// Message Box mode: the recipient asked not to receive messages immediately, so
+	// every album item is persisted as a delivery reference (grouped by
+	// media_group_id) instead of being copied. The whole gallery is reassembled when
+	// the recipient opens the box.
+	if ud.d.groupBoxOn {
+		dbctx, cancel := b.bg()
+		defer cancel()
+		if err := b.storeBoxIncoming(dbctx, ud.d.groupTargetUID, userid, []boxIncoming{
+			{msg: msg, targetCid: ud.d.groupBoxTargetCid},
+		}); err != nil {
+			return err
+		}
+		ud.d.groupExpiration = nowSeconds() + config.ExpireAfter
+		return nil
+	}
+
 	targetUID := ud.d.groupTargetUID
 
 	dbctx, cancel := b.bg()

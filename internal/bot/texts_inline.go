@@ -110,4 +110,15 @@ const (
 	txtInitNoCID      = "مشکلی در ساخت لینک ناشناس بوجود اومد. دوباره تلاش کن و اگه موفق نشدی، قبل از استفاده از بات با پشتیبانی تماس بگیر"
 	txtDBProblem      = "مشکلی برای دیتابیس به وجود آمده. به پشتیبانی خبردادیم، لطفا صبر کنید و دوباره تلاش کنید"
 	txtNetworkProblem = "به مشکل اینترنتی برخوردیم. لطفاً دوباره تلاش کنید."
+
+	// message box (messagebox_ui.go; the delivery logic is messagebox_core.go,
+	// which owns the notification body txtBoxNewMessages and the summary strings).
+	// The notification carries a single "open" button, so the label lives here with
+	// the rest of the UI strings; /message_box is the same action for users who
+	// dismissed the notification.
+	txtBoxOpenButton       = "👀 دیدن پیام‌ها"
+	txtBoxBtnActivate      = "✅ فعالسازی"
+	txtBoxBtnDeactivate    = "❌ غیرفعالسازی"
+	txtBoxAnswerActivate   = "جعبه پیام‌ها روشن شد. پیام‌های جدید اول توی جعبه جمع می‌شن ✅"
+	txtBoxAnswerDeactivate = "جعبه پیام‌ها خاموش شد. پیام‌ها دوباره مثل قبل فوری می‌رسن"
 )

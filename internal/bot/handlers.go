@@ -55,6 +55,13 @@ func (b *Bot) registerHandlers() {
 	// match on (see menu.go), so this cannot shadow them either.
 	d.AddHandler(handlers.NewCallback(cqfilters.Prefix("menu|"), b.menuCallback))
 
+	// The Message Box notification's "open" button. Registered BEFORE the
+	// conversations (same reason as menu|): opening the box is a standalone action
+	// that must work whatever state the user's settings/my_links flow is in, and
+	// "mbox|open" is free of every conversation's cqContains filter (pinned by
+	// TestMessageBoxCallbacksDoNotCollide).
+	d.AddHandler(handlers.NewCallback(cqfilters.Prefix(mboxOpenData), b.prep(messageBoxOpenBtn)))
+
 	// The connect prompt's cancel button, whose data carries the target's link id.
 	// Registered BEFORE the conversations for the reason spelled out on
 	// cancelConnect: the id is user-chosen text, so it must not be possible for it
@@ -68,6 +75,13 @@ func (b *Bot) registerHandlers() {
 	// otherwise the label would be delivered as somebody's anonymous message. The
 	// filter matches only that exact text in a private chat.
 	d.AddHandler(handlers.NewMessage(menuBarFilter, b.topLevel(menuCmd)))
+
+	// /message_box — opening the Message Box must work from ANY state, including
+	// while the start conversation is waiting for the next message to deliver: the
+	// user may well decide to read their box mid-conversation. Registered before the
+	// conversations like the menu bar, so the start conversation's catch-all
+	// fallback cannot swallow it as "something to cancel".
+	b.command("message_box", messageBoxCmd)
 
 	// start_cmd_handler — the per-user conversation.
 	d.AddHandler(b.startConversation())
@@ -142,6 +156,7 @@ func (b *Bot) settingsConversation() handlers.Conversation {
 		handlers.NewCallback(cqfilters.Prefix("easier-answer|"), b.prep(easierAnswer)),
 		handlers.NewCallback(cqfilters.Prefix("channel-signature|"), b.prep(channelSignature)),
 		handlers.NewCallback(cqfilters.Prefix("seen-settings|"), b.prep(seenSettings)),
+		handlers.NewCallback(cqfilters.Prefix(mboxSettingsPrefix), b.prep(messageBoxSettings)),
 		handlers.NewCallback(cqfilters.Prefix("name-sync|"), b.prep(nameSyncClbk)),
 		handlers.NewCallback(cqfilters.Prefix("anon-name|"), b.prep(anonName)),
 		handlers.NewCallback(cqfilters.Prefix("anon-name-set"), b.prep(anonNameSet)),
