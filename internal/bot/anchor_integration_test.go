@@ -228,6 +228,7 @@ func newHarness(t *testing.T) *harness {
 		DynsetPath:      filepath.Join(t.TempDir(), "dynamic_settings.json"),
 		ReportChatID:    "-1001000000001",
 		ErrorChatID:     "-1001000000002",
+		ContinueWindow:  6 * time.Second, // production default: plain follow-ups stay on the same conversation
 	}
 
 	ctx := context.Background()
@@ -443,12 +444,17 @@ func TestAnchorReplyDeliversExactlyOnce(t *testing.T) {
 		t.Fatalf("third reply delivered %d copies; want 1", got)
 	}
 
-	// A message NOT replying to anything, once the conversation is over, is not
-	// silently delivered to the old target.
+	// A message NOT replying to anything IS delivered while the follow-up window is
+	// open (that is the "two messages typed straight after each other" behaviour —
+	// see TestFollowupPlainMessagesBothDeliver in batch_box_integration_test.go).
+	// Once the window expires it must NOT be silently delivered to the old target.
+	h.b.Cfg.ContinueWindow = 30 * time.Millisecond
+	defer func() { h.b.Cfg.ContinueWindow = 6 * time.Second }()
+	time.Sleep(100 * time.Millisecond)
 	mark = h.tg.mark()
 	h.send(sender, "یه پیام بی ربط", nil)
 	if got := h.copies(mark, target); got != 0 {
-		t.Errorf("a stray message delivered %d copies; want 0", got)
+		t.Errorf("a stray message delivered %d copies after the follow-up window; want 0", got)
 	}
 }
 

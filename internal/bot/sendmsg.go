@@ -159,6 +159,19 @@ func (b *Bot) sendMsgCore(ctx *ext.Context, userid string) (string, error) {
 	//                        first to preserve order (answer, album or channel reply).
 	key := convKey{senderUID: userid, targetUID: targetUID}
 	groupable := targetMid == "" && !wasChannelReply && mediaGroupID == "" && externalReply == nil
+
+	// Buffering comes FIRST, even when the recipient's box is on: the flush decides
+	// whether to deliver or store the burst, and a burst therefore becomes one store
+	// event (one "new messages" notification carrying the whole count) instead of a
+	// ping per message. The box check below still covers the immediate paths
+	// (answers, albums, channel replies) and the batching-disabled mode.
+	if groupable && b.batcher != nil && b.batcher.Enabled() {
+		ud.noteSentTarget(targetUID, targetCid)
+		ud.clear()
+		b.batcher.Add(key, batchItem{msg: msg, targetCid: targetCid})
+		return delNone, nil
+	}
+
 	boxOn := b.boxEnabled(dbctx, targetUID)
 
 	if boxOn {
@@ -190,22 +203,29 @@ func (b *Bot) sendMsgCore(ctx *ext.Context, userid string) (string, error) {
 		if err := b.storeBoxIncoming(dbctx, targetUID, userid, []boxIncoming{in}); err != nil {
 			return "", err
 		}
+		if targetMid == "" && !wasChannelReply {
+			// A follow-up typed before the conversation state ends goes to the same
+			// recipient instead of the catch-all.
+			ud.noteSentTarget(targetUID, targetCid)
+		}
 		// One confirmation per incoming message/album-item. The recipient-side
-		// notification is throttled separately (notifyNewBoxMessages).
+		// notification is sent per stored message/album-item (with the pending count).
 		if e := b.replyText(ctx, txtSentToTheirBox); e != nil {
 			return "", e
 		}
 		return delNone, nil
 	}
 
-	if groupable && b.batcher != nil && b.batcher.Enabled() {
-		ud.clear()
-		b.batcher.Add(key, batchItem{msg: msg, targetCid: targetCid})
-		return delNone, nil
-	}
-
 	// Immediate path: make sure nothing older is still buffered for this conversation.
 	b.flushPendingBatch(key)
+
+	// Remember the conversation for CONTINUE_WINDOW: once this send finishes the
+	// conversation state ends, so a second message typed straight after it would
+	// otherwise fall through to the catch-all ("متوجه نشدم"). Channels/answers keep
+	// their own explicit targeting and are not remembered.
+	if targetMid == "" && !wasChannelReply && externalReply == nil {
+		ud.noteSentTarget(targetUID, targetCid)
+	}
 
 	// Seal the SENDER's uid into opaque, unlinkable tokens for the message's
 	// buttons — replaces the keyless EncodeChevaletID, which was reversible by any

@@ -41,6 +41,16 @@ type userData struct {
 	// call, so warning on every trip turns the anti-spam measure into its own flood.
 	lastWarn int64
 
+	// lastTarget*: the conversation this user most recently sent an anonymous
+	// message to, and when. A plain follow-up message inside ContinueWindow goes to
+	// the same recipient instead of falling through to the catch-all — the
+	// conversation state itself ends as soon as a message is sent. In memory only,
+	// never logged, wiped when it expires (see continueTarget).
+	// Guarded by mu (prep holds it for the whole handler).
+	lastTargetUID string
+	lastTargetCid string
+	lastTargetAt  time.Time
+
 	// lastAccess: when this entry was last fetched. The userStore sweep evicts
 	// long-idle entries to bound memory under a large/hostile population.
 	// Guarded by the userStore mutex (set in get, read in sweep).
@@ -223,6 +233,31 @@ func (s *userStore) sweep(idle time.Duration) int {
 // the lock for the duration of the handler.
 func (b *Bot) ud(ctx *ext.Context) *userData {
 	return b.users.get(ctx.EffectiveUser.Id)
+}
+
+// noteSentTarget records the conversation a plain anonymous message was accepted
+// for, so a follow-up typed before ContinueWindow expires is routed to the same
+// recipient (see continueTarget). The caller holds u.mu (prep does).
+func (u *userData) noteSentTarget(targetUID, targetCid string) {
+	u.lastTargetUID = targetUID
+	u.lastTargetCid = targetCid
+	u.lastTargetAt = time.Now()
+}
+
+// continueTarget returns the recipient a plain follow-up should go to within
+// window, or ok=false when the window has expired (in which case the stale target
+// is dropped so it cannot be resurrected). The caller holds u.mu (prep does).
+func (u *userData) continueTarget(window time.Duration) (targetUID, targetCid string, ok bool) {
+	if window <= 0 || u.lastTargetUID == "" || u.lastTargetAt.IsZero() {
+		return "", "", false
+	}
+	if time.Since(u.lastTargetAt) > window {
+		u.lastTargetUID = ""
+		u.lastTargetCid = ""
+		u.lastTargetAt = time.Time{}
+		return "", "", false
+	}
+	return u.lastTargetUID, u.lastTargetCid, true
 }
 
 // nowSeconds reproduces Python's time.time() (wall-clock seconds as a float).

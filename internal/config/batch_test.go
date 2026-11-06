@@ -14,6 +14,7 @@ func TestBatchDefaults(t *testing.T) {
 	t.Setenv("BATCH_WINDOW_MS", "")
 	t.Setenv("BATCH_MAX_WAIT_MS", "")
 	t.Setenv("BATCH_MAX_MESSAGES", "")
+	t.Setenv("CONTINUE_WINDOW_MS", "")
 
 	c, err := Load()
 	if err != nil {
@@ -28,6 +29,9 @@ func TestBatchDefaults(t *testing.T) {
 	if c.BatchMaxMessages != 10 {
 		t.Errorf("BatchMaxMessages = %d; want 10", c.BatchMaxMessages)
 	}
+	if c.ContinueWindow != 6*time.Second {
+		t.Errorf("ContinueWindow = %s; want 6s", c.ContinueWindow)
+	}
 }
 
 // TestBatchOverrides: each knob is configurable and parsed as documented.
@@ -36,6 +40,7 @@ func TestBatchOverrides(t *testing.T) {
 	t.Setenv("BATCH_WINDOW_MS", "1200")
 	t.Setenv("BATCH_MAX_WAIT_MS", "4000")
 	t.Setenv("BATCH_MAX_MESSAGES", "3")
+	t.Setenv("CONTINUE_WINDOW_MS", "1500")
 
 	c, err := Load()
 	if err != nil {
@@ -50,13 +55,18 @@ func TestBatchOverrides(t *testing.T) {
 	if c.BatchMaxMessages != 3 {
 		t.Errorf("BatchMaxMessages = %d; want 3", c.BatchMaxMessages)
 	}
+	if c.ContinueWindow != 1500*time.Millisecond {
+		t.Errorf("ContinueWindow = %s; want 1.5s", c.ContinueWindow)
+	}
 }
 
 // TestBatchDisabled: window 0 is the documented escape hatch that restores the
-// immediate-delivery behaviour.
+// immediate-delivery behaviour; CONTINUE_WINDOW_MS=0 likewise disables the
+// follow-up continuation shortcut.
 func TestBatchDisabled(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("BATCH_WINDOW_MS", "0")
+	t.Setenv("CONTINUE_WINDOW_MS", "0")
 
 	c, err := Load()
 	if err != nil {
@@ -64,6 +74,9 @@ func TestBatchDisabled(t *testing.T) {
 	}
 	if c.BatchWindow != 0 {
 		t.Errorf("BatchWindow = %s; want 0 (disabled)", c.BatchWindow)
+	}
+	if c.ContinueWindow != 0 {
+		t.Errorf("ContinueWindow = %s; want 0 (disabled)", c.ContinueWindow)
 	}
 }
 
@@ -74,6 +87,7 @@ func TestBatchInvalidValues(t *testing.T) {
 		"BATCH_WINDOW_MS":    "abc",
 		"BATCH_MAX_WAIT_MS":  "-5",
 		"BATCH_MAX_MESSAGES": "0",
+		"CONTINUE_WINDOW_MS": "nope",
 	}
 	for key, value := range cases {
 		key, value := key, value

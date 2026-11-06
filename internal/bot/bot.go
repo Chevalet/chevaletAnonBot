@@ -60,12 +60,6 @@ type Bot struct {
 	// Run can drain it on shutdown and tests can drive it directly.
 	batcher *batcher
 
-	// boxNotify* throttle the "you have new messages" ping of the Message Box mode
-	// (per recipient), so several senders do not produce several notifications.
-	// Guarded by boxNotifyMu; bounded by the number of users who enabled the box.
-	boxNotifyMu sync.Mutex
-	boxNotify   map[string]time.Time
-
 	// convStores holds the three ConversationHandlers' state storages so a stale
 	// flow can be dropped when the user starts a different one. Without this, a
 	// user part-way through composing a message who goes to settings and types a
@@ -176,7 +170,6 @@ func New(cfg *config.Config, database *db.DB, txt *texts.Loader) (*Bot, error) {
 		admins:     make(map[string]bool, len(cfg.Admins)),
 		errReports: newErrReportStore(50),
 		limiter:    limiter,
-		boxNotify:  make(map[string]time.Time),
 	}
 	// Wired after b exists: the flush path is a method on b.
 	b.batcher = newBatcher(cfg.BatchWindow, cfg.BatchMaxWait, cfg.BatchMaxMessages, b.deliverBatch)

@@ -17,6 +17,7 @@ package bot
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
@@ -48,8 +49,14 @@ var (
 // box" notification: one button that opens the box. messagebox_core.go uses this
 // when it notifies a user of held messages, so the button's data and label stay
 // in one place (and are pinned by TestBoxNotificationMarkup).
-func boxNotificationMarkup() gotgbot.InlineKeyboardMarkup {
-	return ikb(row(cb(txtBoxOpenButton, mboxOpenData)))
+func boxNotificationMarkup(pending int) gotgbot.InlineKeyboardMarkup {
+	label := txtBoxOpenButton
+	if pending > 0 {
+		// The pending count rides on the button so the recipient can see how much is
+		// waiting at a glance (and it updates with every new notification).
+		label = fmt.Sprintf("%s (%d)", txtBoxOpenButton, pending)
+	}
+	return ikb(row(cb(label, mboxOpenData)))
 }
 
 // messageBoxOpenBtn handles the notification's open button: acknowledge the tap,

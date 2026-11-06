@@ -103,6 +103,16 @@ type Config struct {
 	// the added latency and the size of the sender-side "sent" confirmation.
 	BatchMaxMessages int
 
+	// ContinueWindow is how long after a delivered message a PLAIN follow-up from
+	// the same sender keeps going to the same recipient without re-opening the
+	// link. The bot's conversation state ends once a message is sent (the Python
+	// behaviour), so without this a second quickly-typed message fell through to
+	// the catch-all and the sender got "متوجه نشدم" instead of their message being
+	// delivered. It is deliberately short: it is a "still typing" window, not a
+	// permanent binding, so a message typed much later cannot be delivered to
+	// somebody the sender has moved on from. 0 disables it.
+	ContinueWindow time.Duration
+
 	// TokenKeys are OPTIONAL extra secrets (TOKEN_KEYS, comma-separated) kept in
 	// the callback-token keyring for rotation: the current key is derived from
 	// BOT_TOKEN, and these older secrets (e.g. a previous BOT_TOKEN) let buttons
@@ -297,6 +307,20 @@ func Load() (*Config, error) {
 	// extension; clamp rather than failing the boot.
 	if c.BatchWindow > 0 && c.BatchMaxWait < c.BatchWindow {
 		c.BatchMaxWait = c.BatchWindow
+	}
+
+	// CONTINUE_WINDOW_MS: how long a plain follow-up message after a send keeps
+	// going to the same recipient (see Config.ContinueWindow). 6s is long enough
+	// for a person to type a second line after pressing send, short enough that a
+	// message typed later is not silently delivered to the previous contact.
+	c.ContinueWindow = 6 * time.Second
+	if v := opt("CONTINUE_WINDOW_MS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			errs = append(errs, fmt.Sprintf("CONTINUE_WINDOW_MS must be a non-negative integer (got %q)", v))
+		} else {
+			c.ContinueWindow = time.Duration(n) * time.Millisecond
+		}
 	}
 
 	// Optional callback-token rotation keyring (see TokenKeys). Trimmed, blanks

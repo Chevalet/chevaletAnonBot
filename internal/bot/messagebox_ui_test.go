@@ -6,6 +6,7 @@ package bot
 // Telegram wiring — the parts where a wrong callback string fails silently.
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -92,9 +93,10 @@ func TestMessageBoxCallbacksDoNotCollide(t *testing.T) {
 // TestBoxNotificationMarkup: the notification carries exactly one button, whose
 // data opens the box and whose label comes from the shared text constant.
 func TestBoxNotificationMarkup(t *testing.T) {
-	kb := boxNotificationMarkup()
+	// With no count the label is the plain button text.
+	kb := boxNotificationMarkup(0)
 	if len(kb.InlineKeyboard) != 1 || len(kb.InlineKeyboard[0]) != 1 {
-		t.Fatalf("boxNotificationMarkup() has %d rows; want exactly one row with one button",
+		t.Fatalf("boxNotificationMarkup(0) has %d rows; want exactly one row with one button",
 			len(kb.InlineKeyboard))
 	}
 	btn := kb.InlineKeyboard[0][0]
@@ -106,6 +108,15 @@ func TestBoxNotificationMarkup(t *testing.T) {
 	}
 	if len(btn.CallbackData) > 64 {
 		t.Errorf("notification button data is %d bytes (>64)", len(btn.CallbackData))
+	}
+
+	// The pending count must be visible on the button itself.
+	for _, n := range []int{1, 2, 37} {
+		kb := boxNotificationMarkup(n)
+		label := kb.InlineKeyboard[0][0].Text
+		if !strings.Contains(label, txtBoxOpenButton) || !strings.Contains(label, fmt.Sprintf("(%d)", n)) {
+			t.Errorf("boxNotificationMarkup(%d) label = %q; want it to carry the count", n, label)
+		}
 	}
 }
 

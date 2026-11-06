@@ -95,7 +95,7 @@ func (h *harness) boxNotification(uid int64) *gotgbot.Message {
 	h.t.Helper()
 	var latest *apiCall
 	for _, c := range h.callsTo(0, "sendMessage", uid) {
-		if strings.Contains(c.params["text"], txtBoxNewMessages) {
+		if strings.Contains(c.params["text"], "پیام جدید") {
 			cc := c
 			latest = &cc
 		}
@@ -188,7 +188,11 @@ func TestBatchDoesNotMergeAcrossConversations(t *testing.T) {
 	h.send(alice, "seed carol 2", carolAnchor)
 
 	// Let the seed messages flush before marking, so only the burst below is counted.
-	time.Sleep(200 * time.Millisecond)
+	// (Wait for the copies instead of sleeping: the delivery is paced by the outbound
+	// rate limiter, so a fixed sleep is racy on a loaded machine.)
+	h.waitFor(5*time.Second, "the seed batches to finish delivering", func() bool {
+		return len(h.callsTo(0, "copyMessage", bob)) >= 2 && len(h.callsTo(0, "copyMessage", carol)) >= 2
+	})
 
 	// Now interleave two bursts for DIFFERENT conversations inside one batch window.
 	mark := h.tg.mark()
@@ -210,6 +214,8 @@ func TestBatchDoesNotMergeAcrossConversations(t *testing.T) {
 			t.Errorf("copy to bob came from %s; want only alice %s", got, aliceStr)
 		}
 	}
+	// Give any late flush a moment: the assertion below must be exact.
+	time.Sleep(150 * time.Millisecond)
 	if got := len(h.callsTo(mark, "copyMessage", carol)); got != 1 {
 		t.Errorf("copies to carol = %d; want 1 (her own conversation)", got)
 	}
@@ -556,9 +562,9 @@ func TestBatchRespectsMessageBox(t *testing.T) {
 	if got := len(h.callsTo(mark, "copyMessage", recipient)); got != 0 {
 		t.Fatalf("buffered messages were delivered despite the box being on (%d copies)", got)
 	}
-	if got := len(h.messagesWithText(mark, recipient, txtBoxNewMessages)); got != 1 {
-		t.Fatalf("notifications = %d; want 1 for the whole burst", got)
-	}
+	h.waitFor(2*time.Second, "the burst notification", func() bool {
+		return len(h.messagesWithText(mark, recipient, "پیام جدید")) == 1
+	})
 
 	notification := h.boxNotification(recipient)
 	mark = h.tg.mark()
@@ -603,5 +609,224 @@ func TestMessageBoxCommandWorksMidConversation(t *testing.T) {
 	}
 	if got := h.messagesWithText(mark, recipient, "کنسل"); len(got) != 0 {
 		t.Errorf("the command was swallowed as a cancel: %q", got[0].params["text"])
+	}
+}
+
+// --- follow-up messages after the conversation state ends (Hamid's bug) --------
+//
+// The conversation state ends as soon as a message is sent (Python behaviour), so a
+// second message typed straight after the first used to fall through to the
+// catch-all and the sender got "متوجه نشدم" instead of their message being
+// delivered. CONTINUE_WINDOW closes that hole; these tests pin it.
+
+// TestFollowupPlainMessagesBothDeliver: after sending, a plain (non-reply) message
+// typed immediately is delivered to the same recipient — and batched with the first
+// when batching is on.
+func TestFollowupPlainMessagesBothDeliver(t *testing.T) {
+	h := newHarness(t)
+	h.enableBatching(50*time.Millisecond, 500*time.Millisecond, 10)
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	h.connect(sender, h.linkOf(recipient))
+
+	mark := h.tg.mark()
+	h.send(sender, "پیام اول", nil)
+	h.send(sender, "پیام دوم", nil) // plain follow-up, NOT a reply to the prompt
+
+	h.waitFor(3*time.Second, "both follow-up copies", func() bool {
+		return len(h.callsTo(mark, "copyMessage", recipient)) == 2
+	})
+	if got := h.messagesWithText(mark, sender, txtNotUnderstood); len(got) != 0 {
+		t.Fatalf("the follow-up was rejected as '%s' instead of delivered", txtNotUnderstood)
+	}
+}
+
+// TestFollowupWithoutBatchingBothDeliver: the same guarantee with batching off.
+func TestFollowupWithoutBatchingBothDeliver(t *testing.T) {
+	h := newHarness(t) // batching disabled
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	h.connect(sender, h.linkOf(recipient))
+
+	mark := h.tg.mark()
+	h.send(sender, "اول", nil)
+	h.send(sender, "دوم", nil)
+
+	if got := len(h.callsTo(mark, "copyMessage", recipient)); got != 2 {
+		t.Fatalf("copies = %d; want 2 (both messages delivered)", got)
+	}
+}
+
+// TestFollowupExpires: after the window passes the shortcut must not fire, so an
+// old conversation cannot silently capture a later message.
+func TestFollowupExpires(t *testing.T) {
+	h := newHarness(t)
+	h.b.Cfg.ContinueWindow = 80 * time.Millisecond
+	defer func() { h.b.Cfg.ContinueWindow = 6 * time.Second }()
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	h.connect(sender, h.linkOf(recipient))
+
+	h.send(sender, "اول", nil)
+	time.Sleep(250 * time.Millisecond) // well past the 80ms window
+
+	mark := h.tg.mark()
+	h.send(sender, "بعداً", nil)
+	if got := len(h.callsTo(mark, "copyMessage", recipient)); got != 0 {
+		t.Fatalf("a message outside the continue window was delivered to the old target (%d copies)", got)
+	}
+	if got := h.messagesWithText(mark, sender, txtNotUnderstood); len(got) != 1 {
+		t.Fatalf("expected the ordinary 'didn't understand' reply once, got %d", len(got))
+	}
+}
+
+// TestFollowupDisabled: CONTINUE_WINDOW_MS=0 restores the old behaviour exactly.
+func TestFollowupDisabled(t *testing.T) {
+	h := newHarness(t)
+	h.b.Cfg.ContinueWindow = 0
+	defer func() { h.b.Cfg.ContinueWindow = 6 * time.Second }()
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	h.connect(sender, h.linkOf(recipient))
+
+	h.send(sender, "اول", nil)
+	mark := h.tg.mark()
+	h.send(sender, "دوم", nil)
+	if got := len(h.callsTo(mark, "copyMessage", recipient)); got != 0 {
+		t.Fatalf("continuation fired while disabled (%d copies)", got)
+	}
+}
+
+// --- message-box notifications: every new message, with the pending count -------
+
+// TestBoxNotifiesEveryMessageWithCount: each store event pings the recipient, and
+// the button carries the current pending count.
+func TestBoxNotifiesEveryMessageWithCount(t *testing.T) {
+	h := newHarness(t) // batching off: each message is its own store event
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	h.connect(sender, h.linkOf(recipient))
+	h.setMessageBox(recipient, true)
+
+	h.send(sender, "یک", nil)
+	h.send(sender, "دو", nil) // continuation path -> second store event
+
+	h.waitFor(2*time.Second, "two box notifications", func() bool {
+		return len(h.messagesWithText(0, recipient, "پیام جدید")) == 2
+	})
+	if got := h.pendingBox(recipient); got != 2 {
+		t.Fatalf("pending rows = %d; want 2", got)
+	}
+
+	notifs := h.messagesWithText(0, recipient, "پیام جدید")
+	var kb gotgbot.InlineKeyboardMarkup
+	if err := json.Unmarshal([]byte(notifs[len(notifs)-1].params["reply_markup"]), &kb); err != nil {
+		t.Fatalf("decode latest notification keyboard: %v", err)
+	}
+	label := kb.InlineKeyboard[0][0].Text
+	if !strings.Contains(label, "(2)") {
+		t.Fatalf("latest notification button label = %q; want the pending count (2)", label)
+	}
+
+	// Opening the box still delivers both and clears the count.
+	notification := h.boxNotification(recipient)
+	mark := h.tg.mark()
+	h.press(recipient, notification, mboxOpenData)
+	h.waitFor(2*time.Second, "both boxed messages delivered", func() bool {
+		return len(h.callsTo(mark, "copyMessage", recipient)) == 2
+	})
+	if got := h.pendingBox(recipient); got != 0 {
+		t.Errorf("pending rows after opening = %d; want 0", got)
+	}
+}
+
+// TestBoxBurstNotifiesOnceWithCount: when batching groups a burst, it produces ONE
+// store event and therefore one notification — carrying the burst size.
+func TestBoxBurstNotifiesOnceWithCount(t *testing.T) {
+	h := newHarness(t)
+	h.enableBatching(50*time.Millisecond, 500*time.Millisecond, 10)
+
+	recipient := newUID()
+	sender := newUID()
+	h.startUser(recipient)
+	prompt := h.connect(sender, h.linkOf(recipient))
+	h.setMessageBox(recipient, true)
+
+	mark := h.tg.mark()
+	h.send(sender, "یک", nil)
+	h.send(sender, "دو", prompt)
+	h.send(sender, "سه", prompt)
+
+	h.waitFor(3*time.Second, "the burst stored", func() bool {
+		return h.pendingBox(recipient) == 3
+	})
+	h.waitFor(2*time.Second, "the burst notification", func() bool {
+		return len(h.messagesWithText(mark, recipient, "پیام جدید")) >= 1
+	})
+	notifs := h.messagesWithText(mark, recipient, "پیام جدید")
+	if len(notifs) != 1 {
+		t.Fatalf("notifications for a batched burst = %d; want 1 (with the count)", len(notifs))
+	}
+	var kb gotgbot.InlineKeyboardMarkup
+	if err := json.Unmarshal([]byte(notifs[0].params["reply_markup"]), &kb); err != nil {
+		t.Fatalf("decode notification keyboard: %v", err)
+	}
+	if !strings.Contains(kb.InlineKeyboard[0][0].Text, "(3)") {
+		t.Errorf("burst notification button = %q; want it to show (3)", kb.InlineKeyboard[0][0].Text)
+	}
+}
+
+// --- /start now opens the main menu, exactly like /menu -------------------------
+
+// TestStartOpensMainMenuLikeMenu: both commands must produce the same menu message
+// (short text + the main keyboard), while /start <cid> keeps connecting.
+func TestStartOpensMainMenuLikeMenu(t *testing.T) {
+	h := newHarness(t)
+
+	uid := newUID()
+	h.send(uid, "/start", nil)
+	startMark := h.tg.mark()
+
+	// The /menu that follows is a fresh update; compare what each command sent.
+	h.send(uid, "/menu", nil)
+	menuCalls := h.messagesWithText(startMark, uid, "")
+	if len(menuCalls) == 0 {
+		t.Fatalf("no message after /menu")
+	}
+
+	// Both menu messages: same text and same keyboard as the /menu one.
+	var startCall, menuCall *apiCall
+	calls := h.callsTo(0, "sendMessage", uid)
+	for i := range calls {
+		if strings.Contains(calls[i].params["text"], "منوی اصلی") {
+			cc := calls[i]
+			if startCall == nil {
+				startCall = &cc
+			} else {
+				menuCall = &cc
+			}
+		}
+	}
+	if startCall == nil || menuCall == nil {
+		t.Fatalf("expected two main-menu messages (from /start and /menu), got start=%v menu=%v", startCall, menuCall)
+	}
+	if startCall.params["text"] != menuCall.params["text"] {
+		t.Errorf("/start menu text %q != /menu menu text %q", startCall.params["text"], menuCall.params["text"])
+	}
+	if startCall.params["reply_markup"] != menuCall.params["reply_markup"] {
+		t.Errorf("/start and /menu produced different main keyboards")
+	}
+	if !strings.Contains(startCall.params["reply_markup"], "settings-menu") {
+		t.Errorf("/start did not produce the main menu keyboard: %q", startCall.params["reply_markup"])
 	}
 }

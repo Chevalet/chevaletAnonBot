@@ -38,10 +38,6 @@ const (
 	// boxDeliverLimit is how many rows one "open the box" pass processes. Telegram
 	// rate limits make a bigger single pass pointless and slow.
 	boxDeliverLimit = 50
-	// boxNotifyCooldown keeps a burst from several senders from producing a
-	// notification per message. It is in-memory on purpose: after a restart the worst
-	// case is one extra "you have new messages" ping, which is harmless.
-	boxNotifyCooldown = 60 * time.Second
 	// boxStaleClaimAge is how old a 'delivering' claim must be before startup/open
 	// treats it as abandoned by a crashed process and returns the rows to 'pending'.
 	boxStaleClaimAge = 5 * time.Minute
@@ -49,12 +45,14 @@ const (
 
 const (
 	txtBoxNewMessages = "📬 پیام جدید داری"
-	txtBoxEmpty       = "📭 جعبهٔ پیام‌هات خالیه."
-	txtBoxPartial     = "بعضی پیام‌ها الان تحویل داده نشدن؛ بعداً دوباره با /message_box سر بزن."
-	txtBoxFailed      = "الان نتونستم جعبهٔ پیام‌ها رو باز کنم؛ یه‌کم بعد دوباره امتحان کن."
-	txtBoxDelivered   = "📬 %d پیام از جعبه تحویل داده شد."
-	txtBoxGone        = "پیام‌هایی که توی جعبه بودن دیگه در دسترس نیستن (فرستنده پاکشون کرده)."
-	txtSentToTheirBox = "فرستادم به جعبهٔ پیام‌های مخاطبت؛ هر وقت بازشون کنه سین می‌شن."
+	// txtBoxNewMessagesMany is the plural form; %d is the pending count.
+	txtBoxNewMessagesMany = "📬 %d پیام جدید داری"
+	txtBoxEmpty           = "📭 جعبهٔ پیام‌هات خالیه."
+	txtBoxPartial         = "بعضی پیام‌ها الان تحویل داده نشدن؛ بعداً دوباره با /message_box سر بزن."
+	txtBoxFailed          = "الان نتونستم جعبهٔ پیام‌ها رو باز کنم؛ یه‌کم بعد دوباره امتحان کن."
+	txtBoxDelivered       = "📬 %d پیام از جعبه تحویل داده شد."
+	txtBoxGone            = "پیام‌هایی که توی جعبه بودن دیگه در دسترس نیستن (فرستنده پاکشون کرده)."
+	txtSentToTheirBox     = "فرستادم به جعبهٔ پیام‌های مخاطبت؛ هر وقت بازشون کنه سین می‌شن."
 )
 
 // boxIncoming is one message that arrived for a recipient whose box is enabled.
@@ -137,42 +135,35 @@ func (b *Bot) storeBoxIncoming(dbctx context.Context, recipientUID, senderUID st
 	return nil
 }
 
-// notifyNewBoxMessages pings the recipient that the box has content, at most once
-// per cooldown. Best effort — a failure only costs the ping, the messages stay
+// notifyNewBoxMessages pings the recipient that the box has content. It is called
+// on EVERY store event (one per incoming message, or one per burst when batching
+// grouped the burst), and both the text and the button carry the CURRENT pending
+// count so the recipient can see how much is waiting without opening the box.
+//
+// There is deliberately no cooldown: a user with the box on who keeps receiving
+// messages must keep being told. Batching is what keeps a rapid burst from becoming
+// one ping per message — the whole burst is stored in one call and yields one ping.
+//
+// Best effort — a failed ping only costs the notification, the messages stay
 // reachable through /message_box.
 func (b *Bot) notifyNewBoxMessages(dbctx context.Context, recipientUID string) {
-	if n, err := b.DB.PendingBoxCount(dbctx, recipientUID); err != nil || n == 0 {
+	n, err := b.DB.PendingBoxCount(dbctx, recipientUID)
+	if err != nil || n == 0 {
 		return
 	}
-	now := time.Now()
-	b.boxNotifyMu.Lock()
-	if b.boxNotify == nil {
-		// A Bot built outside New (tests) has no map yet; create it on first use
-		// rather than requiring every constructor to remember.
-		b.boxNotify = make(map[string]time.Time)
-	}
-	last := b.boxNotify[recipientUID]
-	if !last.IsZero() && now.Sub(last) < boxNotifyCooldown {
-		b.boxNotifyMu.Unlock()
-		return
-	}
-	b.boxNotify[recipientUID] = now
-	b.boxNotifyMu.Unlock()
-
 	recipientID, err := strconv.ParseInt(recipientUID, 10, 64)
 	if err != nil {
 		return
 	}
-	kb := boxNotificationMarkup()
-	if _, err := b.TG.SendMessage(recipientID, txtBoxNewMessages, &gotgbot.SendMessageOpts{
+	text := txtBoxNewMessages
+	if n > 1 {
+		text = fmt.Sprintf(txtBoxNewMessagesMany, n)
+	}
+	if _, err := b.TG.SendMessage(recipientID, text, &gotgbot.SendMessageOpts{
 		ParseMode:   "HTML",
-		ReplyMarkup: kb,
+		ReplyMarkup: boxNotificationMarkup(n),
 	}); err != nil {
 		slog.Warn("message box: notification failed", "err", err)
-		// Allow the next qualifying message to try again.
-		b.boxNotifyMu.Lock()
-		delete(b.boxNotify, recipientUID)
-		b.boxNotifyMu.Unlock()
 	}
 }
 

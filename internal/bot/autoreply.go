@@ -349,6 +349,40 @@ func (b *Bot) sendViaConnectAnchor(ctx *ext.Context, userid, targetCid string) (
 	return true, nil
 }
 
+// continueConversation routes a plain message to the recipient of the sender's most
+// recent anonymous message when it arrives inside ContinueWindow. It is a "still
+// typing" shortcut, not a conversation: the window is short, decays on use, and is
+// disabled with CONTINUE_WINDOW_MS=0. It reuses the connect-anchor path so every
+// gate (link still valid, blocked, banned) is applied exactly as when the link was
+// opened.
+func (b *Bot) continueConversation(ctx *ext.Context, userid string) (bool, error) {
+	if b.Cfg.ContinueWindow <= 0 {
+		return false, nil
+	}
+	// A command is a command, never a message to deliver.
+	if msgfilters.Command(ctx.EffectiveMessage) {
+		return false, nil
+	}
+	ud := b.ud(ctx)
+	targetUID, targetCid, ok := ud.continueTarget(b.Cfg.ContinueWindow)
+	if !ok {
+		return false, nil
+	}
+	if targetCid != "" {
+		return b.sendViaConnectAnchor(ctx, userid, targetCid)
+	}
+	// No link id (should not happen for a normal send, which always came through a
+	// cid): fall back to the remembered uid.
+	ud.d.targetCid = ""
+	ud.d.targetUID = targetUID
+	ud.d.replyTo = ""
+	ud.d.channelReply = false
+	if _, err := b.sendMsgTemplate(ctx, userid); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // checkIfAutoreply ports handler_templates.check_if_autoreply: it tries the
 // private-reply path (is_answer) then the channel-reply path (is_reply_to_channel),
 // and on a match stashes the target and runs send_msg_template. handled=true is
@@ -394,6 +428,13 @@ func (b *Bot) checkIfAutoreply(ctx *ext.Context, userid string) (handled bool, e
 			return false, e
 		}
 		return true, nil
+	}
+
+	// follow-up message: the conversation state ends after each send, so a second
+	// message typed straight after the first (before CONTINUE_WINDOW expires) is
+	// delivered to the same recipient instead of being answered with "متوجه نشدم".
+	if handled, err := b.continueConversation(ctx, userid); handled || err != nil {
+		return handled, err
 	}
 
 	// channel reply
