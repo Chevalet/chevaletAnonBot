@@ -19,27 +19,14 @@ func startCmd(b *Bot, tg *gotgbot.Bot, ctx *ext.Context, userid string) error {
 	splitText := strings.Fields(msg.Text)
 
 	if len(splitText) == 1 {
-		// /start with no argument -> the start/help text.
-		txt, err := b.Texts.Get("start_help")
-		if err != nil {
+		// /start with no argument and /menu are the SAME entry point: both open the
+		// main menu (short text + the panel + the persistent bar). /start is the URL
+		// Telegram itself offers and the first thing a new user taps, so it must not
+		// land on a long help page while /menu lands on the menu. The help page is
+		// still one tap away from the menu.
+		if err := menuCmd(b, tg, ctx, userid); err != nil {
 			return err
 		}
-		// b.Dyn, so a donation link an admin changed applies here too (this text is
-		// the first thing a new user reads).
-		txt = strings.ReplaceAll(txt, "%s", b.Dyn.DonationLink())
-
-		// The bar rides along ON the welcome message rather than arriving as a
-		// separate notice: /start should produce one message that already has the
-		// button, which is both what was asked for and one less thing to read.
-		if _, e := ctx.EffectiveMessage.Reply(tg, txt, &gotgbot.SendMessageOpts{
-			ParseMode:          "HTML",
-			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
-			ReplyMarkup:        menuBarKeyboard(),
-		}); e != nil {
-			return e
-		}
-		// Record it so the standalone install notice never fires for this user.
-		b.markMenuBarSent(userid)
 		return handlers.EndConversation()
 	}
 
