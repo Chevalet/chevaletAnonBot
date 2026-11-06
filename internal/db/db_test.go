@@ -51,8 +51,16 @@ func testConfig(t *testing.T) *config.Config {
 
 func freshDB(t *testing.T) (*DB, context.Context) {
 	t.Helper()
+	cfg := testConfig(t)
+	// SAFETY: these tests DROP and recreate tables. Running them with the bot's own
+	// DB_NAME (e.g. after exporting the deployment .env) wipes production/test data.
+	// Require a database whose name ends in _test, matching the isolation the bot's
+	// end-to-end tests already use (BOT_TEST_DB), unless explicitly overridden.
+	if !strings.HasSuffix(cfg.DBName, "_test") && os.Getenv("DB_ALLOW_DESTRUCTIVE") != "1" {
+		t.Skipf("refusing destructive DB test against %q: DB_NAME must end with _test (or set DB_ALLOW_DESTRUCTIVE=1)", cfg.DBName)
+	}
 	ctx := context.Background()
-	d, err := Connect(ctx, testConfig(t))
+	d, err := Connect(ctx, cfg)
 	noErr(t, err, "connect")
 	t.Cleanup(d.Close)
 	for _, tbl := range []string{"users", "blocks", "cids", "reports"} {

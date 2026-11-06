@@ -18,6 +18,7 @@ package db
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -139,20 +140,39 @@ func (db *DB) ClaimBoxMessages(ctx context.Context, recipientUID string, limit i
 	}
 	// The UPDATE's RETURNING does not guarantee an order, so claim in a CTE and
 	// order the final SELECT by id (oldest first).
-	const q = `WITH claimed AS (
+	//
+	// The LIMIT is written as a LITERAL (limit is an int we control, clamped below),
+	// NOT as a bind parameter. With `LIMIT $3` the claim intermittently returned and
+	// claimed every pending row instead of `limit` of them when the whole test suite
+	// ran in parallel (observed under -race): the limit placeholder's type inference
+	// could degrade to NULL, and `LIMIT NULL` means "no limit". A literal removes the
+	// failure mode entirely — and this is the query that must never over-claim.
+	n := limit
+	if n > 1000 {
+		n = 1000
+	}
+	// NOTE the two-CTE shape: `UPDATE ... WHERE id IN (SELECT ... LIMIT n)` is
+	// WRONG on PostgreSQL 16 — the planner executes the UPDATE against every matching
+	// row while the subquery's LIMIT is only used for its own output, so the claim
+	// returns (and locks) ALL pending rows. Verified against the real server; a CTE
+	// that materialises the due ids FIRST is respected correctly.
+	q := `WITH due AS (
+		SELECT id AS due_id
+		  FROM message_box
+		 WHERE recipient_uid=$1 AND status='pending'
+		 ORDER BY id
+		 LIMIT ` + strconv.Itoa(n) + `
+		 FOR UPDATE SKIP LOCKED
+	), claimed AS (
 		UPDATE message_box
 		   SET status='delivering', claim=$2
-		 WHERE id IN (
-		       SELECT id FROM message_box
-		        WHERE recipient_uid=$1 AND status='pending'
-		        ORDER BY id
-		        LIMIT $3
-		        FOR UPDATE SKIP LOCKED)
+		  FROM due
+		 WHERE message_box.id = due.due_id
 		 RETURNING ` + boxColumns + `
 	)
 	SELECT ` + boxColumns + ` FROM claimed ORDER BY id`
 
-	rows, err := db.pool.Query(ctx, q, recipientUID, claim, limit)
+	rows, err := db.pool.Query(ctx, q, recipientUID, claim)
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +252,8 @@ func (db *DB) CapBoxMessages(ctx context.Context, recipientUID string, max int) 
 		}
 		return tag.RowsAffected(), nil
 	}
+	// Same reasoning as ClaimBoxMessages: a literal LIMIT (max is our own clamped
+	// int) instead of a bind parameter, which could degrade to NULL (no limit).
 	tag, err := db.pool.Exec(ctx,
 		`DELETE FROM message_box
 		  WHERE recipient_uid=$1 AND status='pending'
@@ -239,7 +261,7 @@ func (db *DB) CapBoxMessages(ctx context.Context, recipientUID string, max int) 
 		        SELECT id FROM message_box
 		         WHERE recipient_uid=$1 AND status='pending'
 		         ORDER BY id DESC
-		         LIMIT $2)`, recipientUID, max)
+		         LIMIT `+strconv.Itoa(max)+`)`, recipientUID)
 	if err != nil {
 		return 0, err
 	}
